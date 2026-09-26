@@ -1,11 +1,8 @@
 (function () {
   "use strict";
 
-  const viewElements = document.querySelectorAll("[data-view]");
-  const navButtons = document.querySelectorAll("[data-nav]");
-  const tabButtons = document.querySelectorAll('[role="tab"]');
-  const panels = document.querySelectorAll("[data-panel]");
   const form = document.getElementById("analysis-form");
+  const runDetails = document.getElementById("run-details");
   const exampleQuestionField = document.getElementById("example-question");
   const questionField = document.getElementById("question");
   const runButton = document.querySelector("[data-run-button]");
@@ -16,30 +13,6 @@
     "How many available units are in the West warehouse?",
     "What are the available units in each warehouse?"
   ];
-
-  function setView(viewName) {
-    viewElements.forEach(function (view) {
-      view.hidden = view.dataset.view !== viewName;
-    });
-    navButtons.forEach(function (button) {
-      button.classList.toggle("is-current", button.dataset.nav === viewName);
-    });
-    window.scrollTo({ top: 0, behavior: "smooth" });
-  }
-
-  function setTab(tabName) {
-    const target = document.querySelector('[data-tab="' + tabName + '"]');
-    if (!target || target.hidden) return;
-    tabButtons.forEach(function (button) {
-      const isActive = button.dataset.tab === tabName;
-      button.classList.toggle("is-active", isActive);
-      button.setAttribute("aria-selected", String(isActive));
-      button.tabIndex = isActive ? 0 : -1;
-    });
-    panels.forEach(function (panel) {
-      panel.hidden = panel.dataset.panel !== tabName;
-    });
-  }
 
   async function request(path, options) {
     const response = await fetch(path, options);
@@ -102,13 +75,12 @@
     if (trace.url) traceLink.href = trace.url;
     setText("[data-resource-summary]", formatResources(run.resources));
 
-    const gapTab = document.getElementById("gap-tab");
-    gapTab.hidden = run.outcome !== "unsupported";
+    document.getElementById("gap-panel").hidden = run.outcome !== "unsupported";
     setText("[data-gap-kind]", run.limitation_kind || "capability_gap");
     setText("[data-gap-reason]", run.limitation_reason || "The question could not be represented by the current task contract.");
     copyButton.disabled = !run.run_id;
-    setView("run");
-    setTab("result");
+    runDetails.hidden = false;
+    runDetails.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
   function emptyRow(message) {
@@ -136,7 +108,6 @@
       try {
         renderRun(await request("/api/runs/" + encodeURIComponent(run.run_id)));
       } catch (error) {
-        setView("ask");
         questionField.setCustomValidity(error.message);
         questionField.reportValidity();
       }
@@ -166,31 +137,9 @@
   }
 
   async function loadHealth() {
-    const health = await request("/api/health");
-    setText("[data-atlas-status]", "Atlas " + health.atlas);
-    setText("[data-langsmith-status]", "LangSmith " + health.langsmith);
+    await request("/api/health");
     runButton.disabled = false;
   }
-
-  navButtons.forEach(function (button) {
-    button.addEventListener("click", function () {
-      setView(button.dataset.nav);
-      if (button.dataset.nav === "history") {
-        loadHistory().catch(function (error) { renderHistory("[data-history-list]", [], error.message); });
-      }
-    });
-  });
-
-  tabButtons.forEach(function (button) {
-    button.addEventListener("click", function () { setTab(button.dataset.tab); });
-    button.addEventListener("keydown", function (event) {
-      if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
-      const visible = Array.from(tabButtons).filter(function (item) { return !item.hidden; });
-      const nextIndex = (visible.indexOf(button) + (event.key === "ArrowRight" ? 1 : -1) + visible.length) % visible.length;
-      visible[nextIndex].focus();
-      setTab(visible[nextIndex].dataset.tab);
-    });
-  });
 
   if (exampleQuestionField) {
     exampleQuestionField.addEventListener("change", function () {
@@ -219,6 +168,7 @@
     try {
       const run = await request("/api/runs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question: questionField.value }) });
       renderRun(run);
+      loadHistory().catch(function (error) { renderHistory("[data-history-list]", [], error.message); });
     } catch (error) {
       questionField.setCustomValidity(error.message);
       questionField.reportValidity();
@@ -242,9 +192,8 @@
   });
 
   loadExampleQuestions();
+  loadHistory().catch(function (error) { renderHistory("[data-history-list]", [], error.message); });
   loadHealth().catch(function (error) {
-    setText("[data-atlas-status]", "Atlas unavailable");
-    setText("[data-langsmith-status]", "LangSmith unavailable");
     runButton.title = error.message;
   });
 })();

@@ -108,6 +108,9 @@ def test_local_ui_serves_assets_and_only_dataset_metadata(local_server):
     assert 'id="example-question"' in page
     assert "Current workspace" not in page
     assert "Connected services" not in page
+    assert "<aside" not in page and "data-nav=" not in page
+    assert page.index('id="analysis-form"') < page.index('id="run-details"') < page.index('data-history-list')
+    assert 'hidden' in page.split('id="run-details"', 1)[1].split('>', 1)[0]
 
     status, datasets = request_json(local_server, "/api/datasets")
     assert status == 200

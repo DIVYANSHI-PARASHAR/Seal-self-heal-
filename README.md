@@ -12,7 +12,8 @@ MongoDB Atlas holds structured analyst tables and compact run, case, candidate, 
 
 The operator UI uses the same trusted execution path as the CLI. It automatically chooses a ready
 operator dataset, runs an inventory question, displays the answer and resource use, links to verified
-LangSmith evidence when available, and shows compact run history and capability gaps. Once a version
+LangSmith evidence when available, and shows compact run history and capability gaps on the same page.
+The form stays at the top and the selected run's result and details appear below it. Once a version
 is active, new UI and CLI runs use that pinned commit through the Docker runner. Evolution decisions
 are available through the CLI and Atlas history.
 

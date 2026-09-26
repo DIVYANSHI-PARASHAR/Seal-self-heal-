@@ -6,6 +6,9 @@ operator Atlas dataset, records compact run history, and optionally links a veri
 root trace. Generated evaluation tables are excluded from automatic selection. Once a version
 is active, both surfaces execute that pinned commit in Docker.
 
+The single page keeps the analysis form at the top. A new or selected historical run shows its
+result and run details below the form, with recent runs and capability gaps farther down.
+
 Start it from the repository root after configuring `.env` and materializing a dataset:
 
 ```sh
