@@ -24,6 +24,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from harness.agent import RunResult, logistics_capability_request
 from harness.tools import AnalystTools
+from harness.logistics import LogisticsAgent, LogisticsTools, TOOL_VERSION
 from self_heal.execution import RunExecution, RunExecutor
 from self_heal.model import ChatModel
 from self_heal.settings import AnalystConfig, LangSmithConfig
@@ -54,19 +55,6 @@ class WebRequestError(ValueError):
     """An input error that is safe to present to a local operator."""
 
 
-class _LogisticsBaselineTools:
-    """The current baseline has no model-facing logistics aggregation tool."""
-
-    def __init__(self, table: Any) -> None:
-        self.table = table
-
-    def definitions(self) -> list[dict[str, Any]]:
-        return []
-
-    def execute(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        raise WebRequestError("No logistics tool is active in this version")
-
-
 def _result_message(result: RunResult) -> str:
     if result.outcome == "unsupported":
         return "I can't answer that with my current capabilities."
@@ -74,6 +62,10 @@ def _result_message(result: RunResult) -> str:
         return f"Sorry, I couldn't complete that request: {result.error}."
     assert result.answer is not None and result.interpreted_task is not None
     task, answer = result.interpreted_task, result.answer
+    if task.get("operation") == "count_customers_with_shipment_count_gt":
+        noun = "customer" if answer["value"] == 1 else "customers"
+        return (f"{answer['value']} {noun} sent more than {task['threshold']} shipments "
+                f"from warehouse {task['warehouse_number']} yesterday.")
     metric = {"available": "available", "on_hand": "on-hand", "reserved": "reserved"}[task["metric"]]
     location = {
         "warehouse": f" in the {task.get('filter_value')} warehouse",
@@ -120,7 +112,11 @@ def _history_summary(record: dict[str, Any], *, detail: bool = False) -> dict[st
     answer = record.get("answer") or {}
     if record.get("outcome") == "answered":
         task = record.get("interpreted_task") or {}
-        if "value" in answer and task.get("metric") in {"available", "on_hand", "reserved"}:
+        if "value" in answer and task.get("operation") == "count_customers_with_shipment_count_gt":
+            noun = "customer" if answer["value"] == 1 else "customers"
+            message = (f"{answer['value']} {noun} sent more than {task['threshold']} shipments "
+                       f"from warehouse {task['warehouse_number']} yesterday.")
+        elif "value" in answer and task.get("metric") in {"available", "on_hand", "reserved"}:
             metric = {"available": "available", "on_hand": "on-hand", "reserved": "reserved"}[task["metric"]]
             location = (f" in the {task['filter_value']} warehouse" if task.get("filter_field") == "warehouse"
                         else f" in the {task['filter_value']} category" if task.get("filter_field") == "category"
@@ -158,8 +154,10 @@ def _history_summary(record: dict[str, Any], *, detail: bool = False) -> dict[st
             "error_type": trace.get("error_type"),
         },
         "history_status": record.get("status"),
-        "version": (record.get("execution") or {}).get("source", {}).get("commit") or
-                   (record.get("execution") or {}).get("config", {}).get("task_contract_version"),
+        "version": (TOOL_VERSION if (record.get("dataset") or {}).get("input_kind") == "logistics_bundle"
+                    and record.get("outcome") == "answered" and (record.get("interpreted_task") or {}).get("operation") == "count_customers_with_shipment_count_gt"
+                    else (record.get("execution") or {}).get("source", {}).get("commit") or
+                         (record.get("execution") or {}).get("config", {}).get("task_contract_version")),
         **({"evidence": record.get("evidence")} if detail else {}),
     }
 
@@ -199,7 +197,7 @@ class WebApplication:
                 "langsmith": "enabled" if self.tracing.enabled else "disabled",
                 "task_contract_version": self.config.task_contract_version,
                 "active_version": active.get("commit") if active else self.config.task_contract_version,
-                "logistics_active_version": logistics_active.get("commit") if logistics_active else "logistics-shipment-threshold-v1",
+                "logistics_active_version": logistics_active.get("commit") if logistics_active else TOOL_VERSION,
             }
         if method == "GET" and route.path == "/api/datasets":
             return HTTPStatus.OK, {
@@ -240,7 +238,7 @@ class WebApplication:
             active = self.history.active_version(family)
             records = self.history.versions.find({"task_family": family}).sort("created_at", -1).limit(_limit(query))
             return HTTPStatus.OK, {"active_commit": active.get("commit") if active else None,
-                                   "base_version": "logistics-shipment-threshold-v1" if family == "logistics-shipment-threshold" else self.config.task_contract_version,
+                                   "base_version": TOOL_VERSION if family == "logistics-shipment-threshold" else self.config.task_contract_version,
                                    "versions": [{"version_id": item.get("version_id"),
                                                  "commit": item.get("commit"), "status": item.get("status"),
                                                  "parent_commit": item.get("parent_commit"),
@@ -340,7 +338,7 @@ class WebApplication:
             if logistics_capability_request(request["question"]) is None:
                 raise WebRequestError("This version only recognizes the customer shipment threshold question")
             if self.history.active_version("logistics-shipment-threshold"):
-                raise WebRequestError("The active logistics version needs a compatible runner before browser execution")
+                raise WebRequestError("The active logistics candidate needs a compatible runner before browser execution")
             dataset = self.logistics.dataset_info(dataset_id)
             contract = (self.config.task_contracts or {}).get("logistics-shipment-threshold-v1")
             if not contract:
@@ -348,8 +346,8 @@ class WebApplication:
             logistics_config = replace(self.config, task_family="logistics-shipment-threshold",
                 task_contract_version="logistics-shipment-threshold-v1", contract_hash=canonical_hash(contract))
             execution = RunExecutor(history=self.history, telemetry=self.telemetry, config=logistics_config).run(
-                model=self.model_factory(), tools=_LogisticsBaselineTools(self.logistics.open_session(dataset_id)),
-                dataset=dataset, invocation=request["question"])
+                model=self.model_factory(), tools=LogisticsTools(self.logistics.open_session(dataset_id), logistics_config),
+                dataset=dataset, invocation=request["question"], agent_factory=LogisticsAgent)
             return execution, dataset
         dataset = self.store.dataset_info(dataset_id) if dataset_id is not None else self._default_dataset()
         active = self.history.active_version(self.config.task_family)

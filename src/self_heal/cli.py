@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import certifi
 from pymongo import MongoClient
 from pymongo.errors import PyMongoError
 
@@ -32,6 +33,7 @@ from self_heal.promotion import PromotionManager, PromotionRejected
 from self_heal.settings import evolution_model_config
 from self_heal.final_assessment import FinalAssessmentError, reserve_cases, assess_cases
 from self_heal.logistics_store import LogisticsDatasetStore
+from self_heal.logistics_evaluation import run_logistics_checks
 from evals.logistics.generator import public_incident_bundle
 
 
@@ -53,6 +55,7 @@ def _parser() -> argparse.ArgumentParser:
     materialize.add_argument("--scenario", default="all", help="Scenario ID or all")
     evaluate = evaluation_commands.add_parser("run", help="Run the current harness against one declared scenario")
     evaluate.add_argument("--scenario", required=True, help="Answerable scenario ID")
+    evaluation_commands.add_parser("logistics", help="Check the reviewed logistics tool against the protected oracle")
     history = subcommands.add_parser("history", help="Read compact supervisor evidence from Atlas")
     history_commands = history.add_subparsers(dest="history_command", required=True)
     gaps = history_commands.add_parser("capability-gaps", help="List explicit unsupported requests")
@@ -368,7 +371,7 @@ def main(argv: list[str] | None = None) -> int:
             _emit({"image": image, "digest": builder.build_image()})
             return 0
         uri, database_name = atlas_config()
-        with MongoClient(uri, serverSelectionTimeoutMS=10000, connectTimeoutMS=5000) as client:
+        with MongoClient(uri, tlsCAFile=certifi.where(), serverSelectionTimeoutMS=10000, connectTimeoutMS=5000) as client:
             client.admin.command("ping")
             store = AtlasTableStore(client[database_name], config)
             store.ensure_indexes()
@@ -388,6 +391,11 @@ def main(argv: list[str] | None = None) -> int:
                        "content_hash": info.content_hash})
                 return 0
             if args.command == "eval":
+                if args.evaluation_command == "logistics":
+                    results = run_logistics_checks(logistics, history, config,
+                                                   LangSmithTelemetry(langsmith_config()))
+                    _emit({"checks": results, "passed": all(item["passed"] for item in results)})
+                    return 0 if all(item["passed"] for item in results) else 1
                 return _run_evaluation_command(args, store, config, history)
             if args.command == "final":
                 if args.final_command == "reserve":

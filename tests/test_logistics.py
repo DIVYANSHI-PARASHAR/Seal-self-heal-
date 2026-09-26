@@ -6,11 +6,15 @@ import pytest
 from evals.logistics.generator import public_incident_bundle
 from evals.logistics.oracle import reference_answer
 from harness.agent import AnalystAgent
+from harness.logistics import LogisticsAgent, LogisticsTools, TOOL_NAME
 from harness.tools import AnalystTools
 from self_heal.input_router import InputRouter
 from self_heal.logistics_store import LogisticsDatasetStore
-from self_heal.settings import load_config
+from self_heal.logistics_evaluation import run_logistics_checks
+from self_heal.settings import LangSmithConfig, load_config
+from self_heal.storage import AtlasHistoryStore
 from self_heal.table_store import AtlasTableStore, DatasetError, TableAccessError
+from self_heal.telemetry import LangSmithTelemetry
 
 
 def materialized_store():
@@ -82,6 +86,37 @@ def test_inventory_baseline_records_explicit_logistics_capability_gap_without_re
     assert result.limitation_kind == "capability_gap"
     assert result.capability_request and result.capability_request["kind"] == "shipment_customer_threshold"
     assert result.model_calls == result.tool_calls == result.table_pages == result.table_bytes == 0
+
+
+def test_reviewed_logistics_tool_matches_oracle_across_thresholds_and_pages():
+    store, _, info, bundle = materialized_store()
+    config = load_config()
+    for warehouse, threshold in ((3, 15), (3, 16), (3, 17), (2, 1)):
+        session = store.open_session(info.dataset_id)
+        tools = LogisticsTools(session, config)
+        question = f"How many customers sent more than {threshold} shipments from warehouse {warehouse} yesterday?"
+        result = LogisticsAgent(NoCallsModel(), tools, config).run(question)
+        expected = reference_answer(bundle, {"operation": "count_customers_with_shipment_count_gt",
+            "warehouse_number": warehouse, "relative_day": "yesterday", "threshold": threshold})
+        assert result.outcome == "answered"
+        assert result.answer == expected
+        assert result.model_calls == 0 and result.tool_calls == 1
+        assert session.pages_read >= 1
+        assert tools.definitions()[0]["function"]["name"] == TOOL_NAME
+
+
+def test_logistics_checks_record_four_oracle_graded_trials():
+    database = mongomock.MongoClient()["test"]
+    store = LogisticsDatasetStore(database)
+    store.ensure_indexes()
+    history = AtlasHistoryStore(database)
+    history.ensure_indexes()
+    telemetry = LangSmithTelemetry(LangSmithConfig(False, None, "test", None))
+    results = run_logistics_checks(store, history, load_config(), telemetry)
+    assert len(results) == 4 and all(item["passed"] for item in results)
+    assert [item["actual"]["value"] for item in results] == [2, 1, 0, 1]
+    assert history.evaluations.count_documents({"task_family": "logistics-shipment-threshold"}) == 4
+    assert all(item["role"] == "Logistics tool check" for item in history.evaluations.find({}))
 
 
 def test_router_requires_an_explicit_input_kind():

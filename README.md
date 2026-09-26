@@ -33,10 +33,13 @@ complete datasets or full LangSmith trace contents.
 
 The browser selects the logistics bundle by default when available. If it is not seeded yet, use
 **Load logistics demo** in the UI, or run `self-heal seed-logistics` before starting the server.
-The public bundle contains 8 customers, 3 warehouses, and 74 shipments. The current baseline
-recognizes “How many customers sent more than 15 shipments from warehouse 3 yesterday?” and records
-an honest capability gap against that bundle; it does not yet return the oracle answer. The source
-selector can switch back to an inventory table for the existing inventory questions.
+The public bundle contains 8 customers, 3 warehouses, and 74 shipments. Earlier baseline runs
+recorded an honest capability gap for “How many customers sent more than 15 shipments from warehouse
+3 yesterday?” The reviewed `logistics-shipment-threshold-tool-v2` harness now scans bounded shipment
+pages and returns the oracle answer of 2; the same tool handles other thresholds and warehouses.
+Run `uv run --env-file .env self-heal eval logistics` to record four oracle-graded logistics checks
+in Atlas. This is a reviewed code update, not an automatically generated or promoted candidate.
+The source selector can switch back to an inventory table for existing inventory questions.
 
 ## Phase 6: final assessment and lineage
 
@@ -107,12 +110,13 @@ immutable related-data bundles alongside the existing inventory collections.
 incident fixture; its independent oracle returns `{"value": 2}` for “How
 many customers sent more than 15 shipments from warehouse 3 yesterday?”
 
-The current baseline deliberately refuses that reviewed request before any
+The original baseline deliberately refused that reviewed request before any
 model or data read, with a `capability_gap` and a structured
-`shipment_customer_threshold` request. This preserves the intended evolution
-signal. The protected logistics session itself exposes only catalog/relation
-inspection and filter-bound, cursor-bound shipment pages; it does not expose
-database credentials, collection names, or arbitrary queries.
+`shipment_customer_threshold` request. Those recorded runs preserve the
+evolution signal. The reviewed v2 tool now answers through the protected
+logistics session, which exposes only catalog/relation inspection and
+filter-bound, cursor-bound shipment pages. It does not expose database
+credentials, collection names, or arbitrary queries.
 
 ## Run the protected baseline evaluation
 

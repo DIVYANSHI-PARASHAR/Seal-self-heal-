@@ -12,8 +12,8 @@ task_contract:
   missing_values: reject_dataset
   numeric_values: nonnegative_integers
 
-# Protected registry: inventory is executable today; logistics is an approved
-# future capability contract, not an implicit database-access permission.
+# Protected registry: logistics uses a reviewed bounded harness tool. The
+# contract remains separate from raw database access and inventory tasks.
 task_contracts:
   inventory-totals-v1:
     family: inventory-totals

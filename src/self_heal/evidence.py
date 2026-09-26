@@ -60,6 +60,6 @@ def run_evidence(table: Any, tools: EvidenceTools) -> dict[str, Any]:
     return {
         "atlas": {"collection": "logistics_bundle" if logistics else "analyst_rows", "source": getattr(table, "dataset_id", None),
                   "columns": list(getattr(table, "schema", {})), "pages": pages,
-                  "row_count": sum(len(page["rows"]) for page in pages)},
+                  "row_count": getattr(table, "rows_read", sum(len(page["rows"]) for page in pages))},
         "tool_calls": tools.calls,
     }

@@ -79,6 +79,7 @@ async function loadDatasets(preferredId){
 $("#data-source").addEventListener("change",event=>{
   const value=event.target.value;
   setSource(value==="logistics:pending" ? {input_kind:"logistics_bundle",id:""} : datasets.find(item=>value.endsWith(":"+item.id)) || null);
+  if(location.hash==="#versions")loadVersions();
 });
 $("[data-load-logistics]").addEventListener("click",async()=>{
   if(!serviceReady){set("[data-source-note]","Restart the UI server to enable logistics data");return;}
@@ -141,7 +142,7 @@ function renderAtlas(run){
     });
     root.append(summary);
   }
-  const pageCount = atlas ? atlas.pages.length : Number(measured.table_pages || 0);
+  const pageCount = atlas ? (atlas.pages.length || Number(measured.table_pages || 0)) : Number(measured.table_pages || 0);
   set("[data-atlas-summary]",pageCount+" "+(pageCount === 1 ? "page" : "pages"));
   if(!atlas){
     root.append(el("p","empty-state",pageCount ? "This older run did not store its row snapshot." : "0 table pages read. No Atlas rows were read for this run.")); return;
@@ -149,7 +150,7 @@ function renderAtlas(run){
   const source = el("div","source-line");
   source.append(el("span","", "Collection: "),el("strong","",atlas.collection || "analyst_rows"),el("span","", "Source: "),el("strong","",atlas.source || (run.dataset && run.dataset.id) || "—"),el("span","",atlas.row_count+" rows actually read"));
   root.append(source);
-  if(!atlas.pages.length){ root.append(el("p","empty-state","0 rows read. No Atlas table data was used.")); return; }
+  if(!atlas.pages.length){ root.append(el("p","empty-state",atlas.row_count ? `${atlas.row_count} shipment rows read through the bounded tool. Raw rows are not retained in UI evidence.` : "0 rows read. No Atlas table data was used.")); return; }
   const view = el("div"), pager = el("div","pager"); root.append(view,pager);
   function showPage(){
     view.replaceChildren(); pager.replaceChildren();
@@ -178,7 +179,8 @@ function renderTools(run){
     }));
     recovered=Boolean(calls.length);
   }
-  set("[data-tools-summary]",(calls ? calls.length : (run.resources && run.resources.tool_calls) || 0)+" calls");
+  const callCount=calls ? calls.length : (run.resources && run.resources.tool_calls) || 0;
+  set("[data-tools-summary]",callCount+" "+(callCount===1 ? "call" : "calls"));
   if(!calls){root.append(el("p","empty-state",run.resources && run.resources.tool_calls ? "Tool details were not stored for this older run." : "0 tool calls recorded."));return;}
   if(!calls.length){root.append(el("p","empty-state","0 tool calls recorded. The analyst did not invoke a tool."));return;}
   if(recovered) root.append(el("p","muted","Recovered from the redacted LangSmith trace."));
@@ -320,7 +322,8 @@ function renderRun(run){
   set("[data-version]",run.version && run.version.length > 22 ? run.version.slice(0,12)+"…" : run.version || "—");
   $("[data-version]").title=run.version || "";
   set("[data-duration]",run.resources && run.resources.elapsed_seconds !== undefined ? run.resources.elapsed_seconds+" s" : "—");
-  const resources=run.resources || {};set("[data-resource-summary]",(resources.model_calls ?? 0)+" model · "+(resources.tool_calls ?? 0)+" tools · "+(resources.table_pages ?? 0)+" pages · "+(resources.total_tokens ?? 0)+" tokens");
+  const resources=run.resources || {}, toolCount=resources.tool_calls ?? 0;
+  set("[data-resource-summary]",(resources.model_calls ?? 0)+" model · "+toolCount+" "+(toolCount===1 ? "tool" : "tools")+" · "+(resources.table_pages ?? 0)+" pages · "+(resources.total_tokens ?? 0)+" tokens");
   renderAtlas(run);renderTools(run);renderTrace(run);renderGap(run);renderTimeline(run);showTab("atlas");
   $("[data-atlas-content]").append(disclosure("Atlas run record",{
     run_id:run.run_id,question:run.question,outcome:run.outcome,
@@ -376,7 +379,7 @@ request("/api/health").then(data=>{
   }
   updateRunButton();
 }).catch(error=>{set("[data-atlas-status]","Atlas unavailable");announce(error.message);});
-loadDatasets();
+loadDatasets().then(()=>{if(location.hash==="#versions")loadVersions();});
 loadHistory();
 showPage(location.hash.slice(1) || "ask");
 })();

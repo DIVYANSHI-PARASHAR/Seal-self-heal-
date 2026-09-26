@@ -178,7 +178,7 @@ def test_local_ui_automatically_selects_an_operator_dataset():
         server.server_close()
 
 
-def test_logistics_ui_loads_public_bundle_and_records_honest_gap():
+def test_logistics_ui_loads_public_bundle_and_records_reviewed_tool_call():
     app = make_application(supported_model)
     app.logistics = LogisticsDatasetStore(app.history.runs.database)
     app.logistics.ensure_indexes()
@@ -189,14 +189,18 @@ def test_logistics_ui_loads_public_bundle_and_records_honest_gap():
     assert any(item["input_kind"] == "logistics_bundle" for item in sources["datasets"])
     _, run = app.api("POST", "/api/runs", {"input_kind": "logistics_bundle", "dataset_id": seeded["id"],
         "question": "How many customers sent more than 15 shipments from warehouse 3 yesterday?"})
-    assert run["outcome"] == "unsupported"
+    assert run["outcome"] == "answered"
+    assert run["answer"] == {"value": 2}
     assert run["capability_request"]["kind"] == "shipment_customer_threshold"
-    assert run["resources"]["model_calls"] == run["resources"]["tool_calls"] == run["resources"]["table_pages"] == 0
+    assert run["resources"]["model_calls"] == 0
+    assert run["resources"]["tool_calls"] == 1
+    assert run["resources"]["table_pages"] > 0
     assert run["dataset"]["relations"]["shipments"] == 74
     _, stored = app.api("GET", "/api/runs/" + run["run_id"])
     assert stored["dataset"]["input_kind"] == "logistics_bundle"
     assert stored["dataset"]["relations"]["customers"]["row_count"] == 8
-    assert stored["gap"]["active_version"] == "logistics-shipment-threshold-v1"
+    assert stored["evidence"]["tool_calls"][0]["name"] == "count_customers_over_shipment_threshold"
+    assert stored["evidence"]["tool_calls"][0]["result"]["value"] == 2
     assert app.history.get_run(run["run_id"])["invocation"]["task_family"] == "logistics-shipment-threshold"
 def test_local_ui_never_auto_selects_a_protected_evaluation_table():
     application = make_application(supported_model, dataset_ids=("eval-only", "incident-generated", "private-generated"))

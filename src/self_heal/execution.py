@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from harness.agent import AnalystAgent, RunResult
 from harness.tools import AnalystTools
@@ -59,6 +59,7 @@ class RunExecutor:
         invocation: dict[str, Any] | str,
         case_id: str | None = None,
         case_exposure: str | None = None,
+        agent_factory: Callable[[ChatModel, Any, AnalystConfig], Any] = AnalystAgent,
     ) -> RunExecution:
         run_id = new_run_id()
         started_at = utc_now()
@@ -85,7 +86,7 @@ class RunExecutor:
                 history_error = type(exc).__name__
 
         def invoke(traced_model: ChatModel, traced_tools: AnalystTools) -> RunResult:
-            return AnalystAgent(traced_model, traced_tools, self.config).run(invocation, run_id=run_id)
+            return agent_factory(traced_model, traced_tools, self.config).run(invocation, run_id=run_id)
 
         audited_tools = EvidenceTools(tools)
         result, trace = self.telemetry.execute(

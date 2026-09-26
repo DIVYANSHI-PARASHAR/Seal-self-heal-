@@ -9,6 +9,7 @@ description = "A task-adaptive analyst harness"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "certifi>=2025.1",
     "langsmith>=0.4",
     "openai>=2",
     "pymongo[srv]>=4.10",
