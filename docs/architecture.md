@@ -8,15 +8,17 @@ Self-Heal is one local application containing a custom analyst harness and a tru
 
 ```mermaid
 flowchart TD
-    Task[Task and allowed input data] --> Runner[Trusted local runner]
+    Task[Task and assigned dataset ID] --> Runner[Trusted local runner]
     Runner --> Harness[Versioned custom analyst harness]
     Harness --> Tools[Editable tools and context policy]
+    Tools --> TableAccess[Run-scoped table interface]
+    TableAccess --> Tables[(Atlas analyst datasets and rows)]
     Harness --> Client[Fixed model interface]
     Client --> Provider[OpenRouter model API]
     Runner --> Telemetry[Trusted LangSmith adapter]
     Client --> Telemetry
     Telemetry --> LangSmith[(LangSmith traces)]
-    Runner --> Atlas[(MongoDB Atlas history and trace IDs)]
+    Runner --> Atlas[(Atlas history and trace IDs)]
     Atlas --> Supervisor[Trusted evolution supervisor]
     LangSmith --> Supervisor
     Supervisor --> Cases[Protected scenario generator and oracle]
@@ -31,7 +33,7 @@ flowchart TD
     Active --> Next[Fresh run from accepted version]
 ```
 
-The supervisor processes a task observation directly. A distributed queue, database change stream, remote deployment service, and generic framework adapters are not prerequisites. Atlas persists improvement state and trace references; LangSmith holds detailed execution traces. Neither service executes the harness or generates patches.
+The supervisor processes a task observation directly. A distributed queue, database change stream, remote deployment service, and generic framework adapters are not prerequisites. Atlas is the runtime source of immutable analyst tables as well as improvement state and trace references; LangSmith holds detailed execution traces. Neither service executes the harness or generates patches.
 
 ## Editable harness and protected infrastructure
 
@@ -41,13 +43,14 @@ The supervisor processes a task observation directly. A distributed queue, datab
 | `harness/tools.py` | Tool implementations, descriptions, and registration | Yes |
 | `harness/context.py` | Instructions, selected evidence, and tool-result context policy | Yes |
 | `config/analyst.yaml` | Task contract, edit scope, fixed comparison settings, resource limits | No |
+| `src/self_heal/table_store.py` | Trusted Atlas dataset materialization and run-scoped, bounded table reads | No |
 | `src/self_heal/` | Supervisor, model access, thin LangSmith integration, Atlas storage, runner, evaluation coordination, promotion | No |
-| `evals/analyst/` | Fixture generator, reference calculation, disclosed development scenarios | No |
+| `evals/analyst/` | Dataset definitions, fixture generator, reference calculation, disclosed development scenarios; actual table rows are materialized in Atlas | No |
 | `tests/` and `prompts/` | Supervisor checks and fixed improvement instructions | No |
 
 The first useful evolution is a generated reusable analysis tool and its supporting context policy. The proposer receives the editable source, runtime contract, relevant traces, disclosed eval evidence, and prior hypotheses. It does not receive private validation/final data, reference answers, or authority to change acceptance rules.
 
-A worktree separates source revisions; it is not a security sandbox. The runner uses fresh processes and one local Docker image as the execution boundary for generated candidates. Candidate execution receives only the required source, allowed data, and a model/tool interface mediated by the supervisor. The supervisor instruments that interface and writes LangSmith traces; the candidate container receives no LangSmith key. The grader runs outside that process; the full repository, oracle, expected answers, and GitHub/Atlas credentials must not be mounted into it. Host subprocess execution must not be described as container isolation.
+A worktree separates source revisions; it is not a security sandbox. The runner uses fresh processes and one local Docker image as the execution boundary for generated candidates. Candidate execution receives only the required source, task, and a fixed model/table interface mediated by the trusted runner. The table interface binds a single Atlas dataset to the run and serves schema plus bounded row pages; it does not expose arbitrary queries, other dataset IDs, or Atlas credentials. Candidate tools can combine allowed pages locally to create a new analysis mechanism. The supervisor instruments the model/tool interface and writes LangSmith traces; the candidate container receives no LangSmith key. The grader runs outside that process; the full repository, oracle, expected answers, and GitHub/Atlas credentials must not be mounted into it. Host subprocess execution must not be described as container isolation.
 
 Source allowlisting, independent grading, and execution isolation address different concerns. The implementation must verify all three; local tests alone cannot establish complete security against generated code.
 
@@ -84,17 +87,17 @@ Selection checks the original requirement, previous successful behavior, and fre
 
 LangSmith is the detailed execution log. A thin trusted adapter instruments the OpenRouter-compatible model client and tool boundary, attaches a shared run ID and source/config/model metadata, and records requests, responses, errors, timing, and reported token usage. The supervisor reads the LangSmith trace for diagnosis. Secrets and protected answers must be excluded or redacted before trace upload; a missing trace is marked as incomplete evidence, never treated as success. The independent evaluator remains authoritative for correctness and budgets.
 
-Atlas holds the durable, queryable improvement history; it does not duplicate full model/tool payloads.
+Atlas holds immutable analyst data in `analyst_datasets` and `analyst_rows`, separate from the durable, queryable improvement history below. History records reference dataset IDs and content hashes; they do not duplicate table rows or full model/tool trace payloads.
 
 | Atlas records | Evidence to retain | How the next iteration uses it |
 | --- | --- | --- |
-| Runs | Task and allowed input references, source/config/model identities, LangSmith root trace ID, outcome, independent resource measurements, trace availability | Find the detailed trace and distinguish a harness limitation from an external failure |
-| Eval cases | Structured scenario, input hash, protected oracle version, expected-result reference, origin, split, exposure history | Reuse original failures as regressions while preserving validation/final boundaries |
+| Runs | Task and assigned Atlas dataset ID/hash, source/config/model identities, LangSmith root trace ID, outcome, independent resource measurements, trace availability | Find the detailed trace and distinguish a harness limitation from an external failure |
+| Eval cases | Structured scenario, Atlas dataset ID/hash, protected oracle version, expected-result reference, origin, split, exposure history | Reuse original failures as regressions while preserving validation/final boundaries |
 | Candidates | Parent and candidate commits, hypothesis, edited mechanism, source diff, relevant prior attempts | Avoid blindly repeating rejected hypotheses and build on mechanisms with evidence |
 | Evaluations and decisions | All baseline/candidate trials, case identities, correctness, resource use, trace IDs, reasons for acceptance/rejection | Attribute improvement and retain failures as well as successes |
 | Versions | Active commit, previous commit, associated evidence, activation/rollback history | Pin fresh runs and keep rollback reviewable |
 
-Candidate identities and frozen case definitions must not be silently rewritten. Split/exposure changes are separate history events. Access control must keep private eval records and expected answers away from the proposer and candidate. The supervisor queries Atlas for relevant attempts by task family/mechanism, then fetches only the associated LangSmith traces needed for a proposal. Semantic search, a second trace store, and a custom trace UI are unnecessary for the first build.
+Candidate identities, frozen case definitions, and published Atlas datasets must not be silently rewritten. Split/exposure changes are separate history events. Access control must keep private dataset IDs, eval records, and expected answers away from the proposer and candidate; a candidate's table interface can read only its assigned dataset. The supervisor queries Atlas for relevant attempts by task family/mechanism, then fetches only the associated LangSmith traces needed for a proposal. Semantic search, a second trace store, and a custom trace UI are unnecessary for the first build.
 
 ## Source versions and activation
 

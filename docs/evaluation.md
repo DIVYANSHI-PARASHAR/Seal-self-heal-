@@ -6,21 +6,21 @@ Self-Heal turns observed limitations into persistent eval cases, then accepts ha
 
 ## Creating an eval from an observation
 
-The supervisor records the task, input/environment references, LangSmith trace ID, source/model/configuration identities, observed result, and violated requirement in Atlas. It reads model/tool calls and errors from LangSmith when diagnosing the incident. The trigger can be a wrong result, missing capability, resource exhaustion, or exception.
+The supervisor records the task, assigned Atlas dataset ID/content hash, environment references, LangSmith trace ID, source/model/configuration identities, observed result, and violated requirement in Atlas. It reads model/tool calls and errors from LangSmith when diagnosing the incident. The trigger can be a wrong result, missing capability, resource exhaustion, or exception.
 
-The model proposes a structured scenario within the supported contract. `evals/analyst/generator.py` validates that proposal and materializes the inputs. `evals/analyst/oracle.py` computes the correct result independently of the candidate. Freeze the case before patch generation and replay the baseline on both the observed task and the generated case. The new case must also fail the old harness; separate fresh variations stay hidden for candidate validation.
+The model proposes a structured scenario within the supported contract. `evals/analyst/generator.py` validates that proposal and materializes its rows as a new immutable Atlas dataset through the trusted adapter. `evals/analyst/oracle.py` computes the correct result independently of the candidate. Freeze the dataset ID/hash, case, and expected result before patch generation, then replay the baseline on both the observed task and the generated case. The new case must also fail the old harness; separate fresh Atlas datasets stay hidden for candidate validation.
 
 An exception does not supply the correct answer. An unsupported scenario or one without trustworthy ground truth cannot authorize a behavioral change. The supervisor may record it for investigation or propose diagnostic improvements, but must not invent an expected answer just to complete the cycle.
 
 A scenario record should identify:
 
 - Task family, user-visible task, structured query/requirements, and incident provenance.
-- Input fixture reference, generation parameters, seed reference, and input hash.
+- Atlas dataset ID, row count, generation parameters, seed reference, and content hash.
 - Contract/oracle version and the protected expected-result reference.
 - Correctness invariants and externally enforced resource limits.
 - Case identity, declared evaluation role, creation time, and exposure history.
 
-The model may propose tasks and variations; it cannot edit the generator, reference calculation, grading rules, or budgets. Private seeds and answers remain outside its accessible workspace and database view.
+The model may propose tasks and variations; it cannot edit the generator, reference calculation, grading rules, or budgets. Private seeds, dataset IDs, and answers remain outside its accessible workspace and table interface.
 
 ## Evaluation roles
 
@@ -37,20 +37,20 @@ If final-assessment feedback guides further development, that case becomes devel
 
 ## Comparing baseline and candidate
 
-Run the old and new harness against identical case inputs, reset tool/data state, and record the same model/settings and execution environment. The baseline must fail the original requirement; the candidate must satisfy it. Neither is allowed to alter task truth or increase the acceptance budget.
+Run the old and new harness against the same immutable Atlas dataset ID/hash, with fresh read cursors and counters, and record the same model/settings and execution environment. Detect a changed row count or content hash before comparing trials. The baseline must fail the original requirement; the candidate must satisfy it. Neither is allowed to alter task truth or increase the acceptance budget.
 
-Grade outside candidate execution. LangSmith traces explain behavior and supply reported model usage; the protected grader and runner remain authoritative for correctness, tool-call count, elapsed time, and budget decisions. Provide only the task and allowed dataset to that process; do not mount the oracle, expected answers, private controls, or entire repository. A candidate cannot self-report the authoritative pass/fail result or resource count.
+Grade outside candidate execution. LangSmith traces explain behavior and supply reported model usage; the protected grader and runner remain authoritative for correctness, tool-call count, Atlas page/byte counts, elapsed time, and budget decisions. Provide the candidate only its task and a trusted table interface bound to the assigned Atlas dataset; do not mount table snapshots, the oracle, expected answers, private controls, credentials, or entire repository. The trusted interface rejects cross-dataset access and arbitrary MongoDB queries. A candidate cannot self-report the authoritative pass/fail result or resource count.
 
 Measure:
 
 - Exact task correctness under the declared output contract, including omissions, duplicates, and invalid outputs where relevant.
-- Model/tool calls, externally observed token usage, elapsed time, and budget violations.
+- Model/tool calls, Atlas pages/bytes read, externally observed token usage, elapsed time, and budget violations.
 - Individual trial results for the original case, existing regressions, and fresh validation.
-- Source/configuration/environment identities, LangSmith trace ID, and the mechanism changed by the patch.
+- Source/configuration/environment identities, Atlas dataset ID/hash, LangSmith trace ID, and the mechanism changed by the patch.
 
 A lower token count does not compensate for a wrong answer. Additional work is permitted only within the fixed, declared acceptance limits. The comparison must not silently change models or give the candidate extra retries.
 
-Deterministic fixtures and a deterministic oracle stabilize grading; they do not make an LLM's choices deterministic. Use scripted model responses for component checks and a few repeated live trials for critical end-to-end behavior. Preserve every trial and report observed variation rather than claiming statistical certainty from a small sample.
+Deterministic Atlas datasets and a deterministic oracle stabilize grading; they do not make an LLM's choices deterministic. Use scripted model responses for component checks and a few repeated live trials for critical end-to-end behavior. Preserve every trial and report observed variation rather than claiming statistical certainty from a small sample.
 
 ## Analyst variations
 
@@ -63,7 +63,7 @@ For a candidate that adds aggregation and changes context selection, use several
 
 Reference answers come from the protected calculation, not the generated aggregation tool. Validate the oracle itself against hand-checked examples before relying on it. The generator varies data and requirements; it does not produce a replacement authoritative grader for each proposed patch.
 
-A fresh question over a new dataset tests reuse within this family. It does not establish cross-domain generalization.
+A fresh question over a new Atlas dataset tests reuse within this family. It does not establish cross-domain generalization.
 
 ## Acceptance and reporting
 

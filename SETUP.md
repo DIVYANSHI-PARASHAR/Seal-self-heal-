@@ -36,9 +36,9 @@ Write or carry over **planning documents only** under `docs/`, clearly marked as
 
 | Phase | Files that begin here |
 | --- | --- |
-| 1. Base analyst and data | `pyproject.toml`, `harness/{agent,tools,context}.py`, `config/analyst.yaml`, `src/self_heal/{cli,model,settings}.py`, first small fixture |
-| 2. Protected eval foundation | `evals/analyst/{generator,oracle,scenarios.yaml}`, protected checks in `tests/` |
-| 3. LangSmith tracing and Atlas | `src/self_heal/{contracts,telemetry,storage}.py`, trace/storage checks |
+| 1. Base analyst and Atlas data | `pyproject.toml`, `harness/{agent,tools,context}.py`, `config/analyst.yaml`, `src/self_heal/{cli,model,settings,table_store}.py`, first Atlas-backed table |
+| 2. Protected eval foundation | `evals/analyst/{generator,oracle,scenarios.yaml}`, deterministic Atlas datasets, protected checks in `tests/` |
+| 3. LangSmith tracing and Atlas history | `src/self_heal/{contracts,telemetry,storage}.py`, trace/storage checks |
 | 4. Eval creation and evolution | `src/self_heal/{controller,evolution,repository,runner}.py`, `prompts/{scenario,diagnose,evolve}.md`, `Dockerfile` |
 | 5. Candidate selection and activation | `src/self_heal/{evaluation,promotion}.py`, acceptance and rollback checks |
 | 6. Untouched assessment and demo | final sealed evaluation cases, reports, and demo instructions |
@@ -56,7 +56,7 @@ Self-Heal is a task-adaptive agent harness. A trusted supervisor turns observed 
 
 The first use case is a small Python analyst for structured tables. The editable harness owns its tools and context policy. The protected supervisor owns the oracle, evaluation limits, trace integration, and version decisions.
 
-MongoDB Atlas will hold compact run, case, candidate, evaluation, and version records. LangSmith will hold detailed model and tool traces linked to those records. OpenRouter will supply model calls. Candidate code will run in a local Docker container; Git will pin each evaluated version.
+MongoDB Atlas will hold structured analyst tables and compact run, case, candidate, evaluation, and version records. A trusted table interface will scope each run to its assigned dataset. LangSmith will hold detailed model and tool traces linked to those records. OpenRouter will supply model calls. Candidate code will run in a local Docker container without Atlas credentials; Git will pin each evaluated version.
 
 **Status:** repository scaffold and service configuration only. Harness behavior, evaluations, tracing, storage, and the improvement loop are built in the six phases described in [docs/build-plan.md](docs/build-plan.md).
 
@@ -91,7 +91,7 @@ Create `.env.example` with the same names used by the current implementation:
 
 ```dotenv
 # Copy this file to .env and fill the blank values. Never commit .env.
-# The trusted supervisor uses this Atlas connection.
+# The trusted runner and supervisor use this Atlas connection.
 ATLAS_URI=
 ATLAS_DATABASE=self_heal
 
@@ -117,7 +117,7 @@ Copy it to `.env` locally. Keep unused values blank until the phase that needs t
 | Setting | First needed | Purpose |
 | --- | --- | --- |
 | `OPENROUTER_API_KEY`, `OPENROUTER_AGENT_MODEL` | Phase 1 | Agent model and live tool-call smoke run |
-| `ATLAS_URI`, `ATLAS_DATABASE` | Phase 3 | Durable supervisor history |
+| `ATLAS_URI`, `ATLAS_DATABASE` | Phase 1 | Atlas-backed analyst tables; Phase 3 also uses them for durable history |
 | `LANGSMITH_TRACING`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT` | Phase 3 | Model, tool, and task traces |
 | `LANGSMITH_WORKSPACE_ID` | Phase 3, only if needed | Select a workspace for a multi-workspace key |
 | `OPENROUTER_EVOLUTION_MODEL` | Phase 4 | Scenario, diagnosis, and patch proposals |
@@ -131,7 +131,7 @@ Copy it to `.env` locally. Keep unused values blank until the phase that needs t
 2. In Atlas, create a database user for the application. Give it only the access needed for the `self_heal` database. Atlas database users are distinct from Atlas account users.
 3. Add the development machine's current IP address to the project's IP access list. If execution later moves to another machine, add that machine's address too.
 4. Use **Connect → Drivers → Python** to copy the `mongodb+srv://...` URI. Replace the password placeholder with the database user's password; URL-encode special characters in it. Put the full URI in local `ATLAS_URI` and keep `ATLAS_DATABASE=self_heal`.
-5. Do not manually create `runs`, `eval_cases`, `candidates`, `evaluations`, or `versions` now. Phase 3 defines records, indexes, and the first linked connectivity check.
+5. Do not manually create application collections. Phase 1 creates `analyst_datasets` and `analyst_rows` and verifies the first table; Phase 3 creates `runs`, `eval_cases`, `candidates`, `evaluations`, and `versions` and performs the first linked LangSmith/Atlas run check.
 
 [Atlas connection guide](https://www.mongodb.com/docs/atlas/connect-to-database-deployment/) documents the database-user and IP-access requirements.
 
@@ -153,7 +153,7 @@ Copy it to `.env` locally. Keep unused values blank until the phase that needs t
 
 ### Local tools and GitHub
 
-Install Git, Python 3.11 or newer, `uv`, and Docker Desktop on the development machine. Git is needed from the beginning; `uv` installs and locks dependencies in Phase 1. Docker must be running for generated-candidate execution in Phase 4, but the Dockerfile and image are not built during this bootstrap step. The supervisor keeps Atlas, LangSmith, and OpenRouter credentials; a candidate container receives only its allowed inputs and fixed runtime interface.
+Install Git, Python 3.11 or newer, `uv`, and Docker Desktop on the development machine. Git is needed from the beginning; `uv` installs and locks dependencies in Phase 1. Atlas must be reachable in Phase 1 to seed and read the base table. Docker must be running for generated-candidate execution in Phase 4, but the Dockerfile and image are not built during this bootstrap step. The trusted runner and supervisor keep Atlas, LangSmith, and OpenRouter credentials; a candidate container receives only its task and fixed, dataset-scoped model/table interface.
 
 A GitHub remote can hold the new repository and later reviewable diffs. The first improvement loop does **not** require a GitHub App, personal-access token, Actions workflow, or automatic PR creation. If this is an event submission, follow the participant guide's public-repository requirement when publishing.
 
@@ -161,4 +161,4 @@ A GitHub remote can hold the new repository and later reviewable diffs. The firs
 
 The scaffold is ready when the directory layout, README, six-phase plan index, `.gitignore`, and `.env.example` exist; `.env` is ignored; the intended accounts/keys are available; and Git points at the new repository. A brief configuration check may verify that required values are present without printing them.
 
-Then begin [Phase 1](docs/phases/01-base-analyst.md). Its completion check is the first live model/tool task. [Phase 3](docs/phases/03-tracing-and-atlas.md) owns the first linked LangSmith/Atlas run; [Phase 4](docs/phases/04-eval-creation-and-evolution.md) owns the Docker image and candidate execution. Do not report any of those capabilities as working based on account setup alone.
+Then begin [Phase 1](docs/phases/01-base-analyst.md). Its completion checks include Atlas table materialization and the first live model/tool task. [Phase 3](docs/phases/03-tracing-and-atlas.md) owns the first linked LangSmith/Atlas run; [Phase 4](docs/phases/04-eval-creation-and-evolution.md) owns the Docker image and candidate execution. Do not report any of those capabilities as working based on account setup alone.
