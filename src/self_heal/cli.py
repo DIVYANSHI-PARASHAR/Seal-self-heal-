@@ -11,10 +11,13 @@ from typing import Any
 from pymongo import MongoClient
 from pymongo.errors import PyMongoError
 
+from evals.analyst.generator import ScenarioError, load_scenarios, materialize_case, prepare_case
+from evals.analyst.oracle import OracleError
 from harness.agent import AnalystAgent, RunResult
 from harness.tools import AnalystTools
+from self_heal.evaluation import EvaluationRunner, baseline_expectation_matches
 from self_heal.model import OpenRouterModel
-from self_heal.settings import agent_model_config, atlas_config, load_config
+from self_heal.settings import AnalystConfig, agent_model_config, atlas_config, load_config
 from self_heal.table_store import AtlasTableStore, DatasetError
 
 
@@ -29,6 +32,12 @@ def _parser() -> argparse.ArgumentParser:
     task_input.add_argument("--question", help="Natural-language question about the assigned table")
     run.add_argument("--dataset", required=True, help="Dataset ID to bind to this run")
     run.add_argument("--json", action="store_true", help="Show the full result as JSON, including for questions")
+    evaluation = subcommands.add_parser("eval", help="Materialize or run protected Phase 2 scenarios")
+    evaluation_commands = evaluation.add_subparsers(dest="evaluation_command", required=True)
+    materialize = evaluation_commands.add_parser("materialize", help="Publish declared valid evaluation datasets to Atlas")
+    materialize.add_argument("--scenario", default="all", help="Scenario ID or all")
+    evaluate = evaluation_commands.add_parser("run", help="Run the current harness against one declared scenario")
+    evaluate.add_argument("--scenario", required=True, help="Answerable scenario ID")
     return parser
 
 
@@ -86,6 +95,47 @@ def _present_run(result: RunResult, *, conversational: bool, json_output: bool) 
     return 1 if result.outcome == "error" else 0
 
 
+def _select_scenarios(scenarios: dict[str, Any], scenario_id: str, *, allow_all: bool) -> list[Any]:
+    if scenario_id == "all" and allow_all:
+        return list(scenarios.values())
+    try:
+        return [scenarios[scenario_id]]
+    except KeyError as exc:
+        raise ValueError("Unknown evaluation scenario") from exc
+
+
+def _run_evaluation_command(args: argparse.Namespace, store: AtlasTableStore, config: AnalystConfig) -> int:
+    scenarios = load_scenarios(config.evaluation.scenarios_path, config)
+    if args.evaluation_command == "materialize":
+        selected = _select_scenarios(scenarios, args.scenario, allow_all=True)
+        published = []
+        for scenario in selected:
+            if scenario.invalid_row is not None:
+                continue
+            materialized = materialize_case(store, prepare_case(scenario, config))
+            published.append(
+                {
+                    "scenario_id": scenario.scenario_id,
+                    "dataset_id": materialized.dataset.dataset_id,
+                    "seed": scenario.seed,
+                    "row_count": materialized.dataset.row_count,
+                    "content_hash": materialized.dataset.content_hash,
+                }
+            )
+        _emit({"materialized": published, "skipped_invalid_scenarios": [s.scenario_id for s in selected if s.invalid_row]})
+        return 0
+
+    scenario = _select_scenarios(scenarios, args.scenario, allow_all=False)[0]
+    case = prepare_case(scenario, config)
+    api_key, model_id = agent_model_config()
+    trial = EvaluationRunner(store, config).run_case(case, OpenRouterModel(api_key, model_id))
+    payload = trial.to_dict()
+    payload["baseline_expectation"] = scenario.baseline_expectation
+    payload["baseline_expectation_matched"] = baseline_expectation_matches(trial, scenario.baseline_expectation)
+    _emit(payload)
+    return 0 if payload["baseline_expectation_matched"] else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
@@ -100,6 +150,8 @@ def main(argv: list[str] | None = None) -> int:
                 info = store.materialize(fixture["dataset_id"], fixture["rows"])
                 _emit({"dataset_id": info.dataset_id, "row_count": info.row_count, "content_hash": info.content_hash})
                 return 0
+            if args.command == "eval":
+                return _run_evaluation_command(args, store, config)
             task = json.loads(args.task) if args.task is not None else args.question
             if args.task is not None and not isinstance(task, dict):
                 raise ValueError("Task must be a JSON object")
@@ -108,7 +160,7 @@ def main(argv: list[str] | None = None) -> int:
             model = OpenRouterModel(api_key, model_id)
             result = AnalystAgent(model, AnalystTools(table, config), config).run(task)
             return _present_run(result, conversational=args.question is not None, json_output=args.json)
-    except (ValueError, KeyError, TypeError, json.JSONDecodeError, DatasetError) as exc:
+    except (ValueError, KeyError, TypeError, json.JSONDecodeError, DatasetError, ScenarioError, OracleError) as exc:
         _emit({"error": str(exc)})
         return 2
     except PyMongoError as exc:

@@ -28,4 +28,13 @@ limits:
   max_calculator_operands: 32
   context_rounds: 5
 
+evaluation:
+  oracle_version: inventory-totals-v1
+  scenarios_path: evals/analyst/scenarios.yaml
+  max_generated_rows: 1024
+  required_baseline_scenarios:
+    - small-east-available
+    - edge-empty-sku
+    - bulk-warehouse-available
+
 editable_paths: [harness/]

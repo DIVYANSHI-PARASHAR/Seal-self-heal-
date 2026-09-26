@@ -27,12 +27,21 @@ class Limits:
 
 
 @dataclass(frozen=True)
+class EvaluationConfig:
+    oracle_version: str
+    scenarios_path: Path
+    max_generated_rows: int
+    required_baseline_scenarios: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class AnalystConfig:
     metrics: tuple[str, ...]
     filter_fields: tuple[str, ...]
     group_fields: tuple[str, ...]
     table_schema: dict[str, str]
     limits: Limits
+    evaluation: EvaluationConfig
 
 
 def load_config(path: Path = DEFAULT_CONFIG) -> AnalystConfig:
@@ -48,12 +57,27 @@ def load_config(path: Path = DEFAULT_CONFIG) -> AnalystConfig:
     groups = tuple(contract["group_fields"])
     if not set(filters + groups).issubset(schema):
         raise ValueError("Filter and grouping fields must exist in the table schema")
+    evaluation_raw = raw["evaluation"]
+    evaluation = EvaluationConfig(
+        oracle_version=evaluation_raw["oracle_version"],
+        scenarios_path=Path(evaluation_raw["scenarios_path"]),
+        max_generated_rows=evaluation_raw["max_generated_rows"],
+        required_baseline_scenarios=tuple(evaluation_raw["required_baseline_scenarios"]),
+    )
+    if (
+        not evaluation.oracle_version
+        or evaluation.max_generated_rows <= 0
+        or not evaluation.required_baseline_scenarios
+        or any(not scenario_id for scenario_id in evaluation.required_baseline_scenarios)
+    ):
+        raise ValueError("Invalid evaluation configuration")
     return AnalystConfig(
         metrics=tuple(contract["metrics"]),
         filter_fields=filters,
         group_fields=groups,
         table_schema=schema,
         limits=limits,
+        evaluation=evaluation,
     )
 
 

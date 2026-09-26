@@ -6,9 +6,9 @@ The first use case is a small Python analyst for structured tables. The editable
 
 MongoDB Atlas will hold the structured analyst tables and compact run, case, candidate, evaluation, and version records. A trusted table interface will let each run read only its assigned dataset without exposing Atlas credentials to generated harness code. LangSmith will hold detailed model and tool traces linked to those records. OpenRouter will supply model calls. Candidate code will run in a local Docker container; Git will pin each evaluated version.
 
-**Status:** Phase 1 is implemented and locally tested. The live analyst read a six-row Atlas table through three explicit tools and answered the East available-inventory task correctly. The CLI also accepts ordinary inventory questions and interprets them into the supported task contract. It marks conversational capability refusals with `outcome=unsupported`; Phase 3 will make those observations searchable in LangSmith and Atlas, and Phase 4 will use validated gaps to propose new harness capabilities. The protected oracle, evaluation suite, LangSmith instrumentation, improvement loop, and candidate runner are planned in later phases of [docs/build-plan.md](docs/build-plan.md).
+**Status:** Phases 1 and 2 are implemented and locally tested. The base analyst reads Atlas-backed tables through three explicit tools and accepts ordinary inventory questions. The evaluator outside `harness/` now generates deterministic datasets, calculates exact answers independently, and verifies the current harness against fixed scenarios. It marks conversational capability refusals with `outcome=unsupported`; Phase 3 will make those observations searchable in LangSmith and Atlas, and Phase 4 will use validated gaps to propose new harness capabilities.
 
-## Run Phase 1
+## Run Phases 1 and 2
 
 From the repository root, install the locked dependencies and load local credentials from the ignored `.env` file:
 
@@ -31,6 +31,16 @@ Structured task runs continue to print JSON with the answer and run metadata.
 
 The base harness registers `inspect_table`, `read_rows`, and `calculate`. A trusted table adapter binds each run to one Atlas dataset and enforces page and byte limits. Its dataset definitions live in `evals/analyst/data/`; the runtime table rows are read from Atlas. The editable harness receives no connection string through its tool interface. Generated code isolation is added in Phase 4.
 
-The planned Phase 2 stress question asks for available inventory grouped by warehouse over a deterministic 512-row Atlas dataset. Its task definition is in `evals/analyst/data/bulk_task.json`; Phase 2 will generate and grade the rows.
+## Run the protected baseline evaluation
+
+Phase 2 declares one small success, one zero-match edge case, and one 512-row grouped stress case in `evals/analyst/scenarios.yaml`. Materialize their valid datasets, then run either baseline check:
+
+```sh
+uv run --env-file .env self-heal eval materialize
+uv run --env-file .env self-heal eval run --scenario small-east-available
+uv run --env-file .env self-heal eval run --scenario bulk-warehouse-available
+```
+
+The small case must pass. The bulk case must report `model_call_budget_exhausted`: each model tool call can read at most four rows, so the base harness cannot inspect all 512 rows inside its eight model calls. The command exits successfully when the observed result matches the declared baseline expectation. Invalid-row scenarios are deliberately skipped during materialization and are tested locally to ensure Atlas rejects them.
 
 See [SETUP.md](SETUP.md) for account and environment setup.
