@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,11 @@ from self_heal.settings import AnalystConfig, agent_model_config, atlas_config, 
 from self_heal.storage import AtlasHistoryStore, HistoryError
 from self_heal.table_store import AtlasTableStore, DatasetError
 from self_heal.telemetry import LangSmithTelemetry
+from self_heal.controller import EvolutionController, EvolutionBlocked
+from self_heal.repository import CandidateRepository, PatchRejected
+from self_heal.runner import CandidateRunner, RunnerError
+from self_heal.promotion import PromotionManager, PromotionRejected
+from self_heal.settings import evolution_model_config
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -53,7 +59,18 @@ def _parser() -> argparse.ArgumentParser:
     attempts.add_argument("--task-family", required=True)
     attempts.add_argument("--changed-mechanism")
     attempts.add_argument("--limit", type=int, default=20, help="Maximum records to return (1-100)")
-    ui = subcommands.add_parser("ui", help="Start the local Phase 3 operator interface")
+    active = history_commands.add_parser("active", help="Show the active pinned harness version")
+    evolve = subcommands.add_parser("evolve", help="Diagnose and evolve one recorded limitation")
+    evolve.add_argument("--run-id", required=True, help="Completed Atlas run ID")
+    evolve.add_argument("--rescreen-candidate", help="Retry one stored patch after a screening fix")
+    runner = subcommands.add_parser("runner", help="Manage the isolated candidate image")
+    runner_commands = runner.add_subparsers(dest="runner_command", required=True)
+    runner_commands.add_parser("build", help="Build the local Docker runner image")
+    rollback = subcommands.add_parser("rollback", help="Activate a retained previous version")
+    rollback.add_argument("--expected-active", required=True)
+    rollback.add_argument("--commit", required=True)
+    rollback.add_argument("--reason", required=True)
+    ui = subcommands.add_parser("ui", help="Start the local operator interface")
     ui.add_argument("--host", default="127.0.0.1", help="Local address to listen on (default: 127.0.0.1)")
     ui.add_argument("--port", type=int, default=4173, help="Local port to listen on (default: 4173)")
     return parser
@@ -224,6 +241,9 @@ def _history_run_summary(record: dict[str, Any]) -> dict[str, Any]:
 
 
 def _run_history_command(args: argparse.Namespace, history: AtlasHistoryStore) -> int:
+    if args.history_command == "active":
+        _emit({"active": history.active_version(load_config().task_family)})
+        return 0
     if args.history_command == "capability-gaps":
         records = history.capability_gaps(task_family=args.task_family, limit=args.limit)
         _emit({"runs": [_history_run_summary(record) for record in records]})
@@ -296,6 +316,12 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         config = load_config()
+        image = os.environ.get("SELF_HEAL_RUNNER_IMAGE", "self-heal-runner:local")
+        if args.command == "runner":
+            builder = CandidateRunner(store=None, config=config, history=None,
+                                      telemetry=LangSmithTelemetry(langsmith_config()), image=image)
+            _emit({"image": image, "digest": builder.build_image()})
+            return 0
         uri, database_name = atlas_config()
         with MongoClient(uri, serverSelectionTimeoutMS=10000, connectTimeoutMS=5000) as client:
             client.admin.command("ping")
@@ -312,32 +338,69 @@ def main(argv: list[str] | None = None) -> int:
                 return _run_evaluation_command(args, store, config, history)
             if args.command == "history":
                 return _run_history_command(args, history)
+            if args.command == "rollback":
+                result = PromotionManager(history, CandidateRepository(Path.cwd())).rollback(
+                    task_family=config.task_family, expected_active=args.expected_active,
+                    target_commit=args.commit, reason=args.reason,
+                )
+                _emit(result)
+                return 0
+            if args.command == "evolve":
+                agent_key, agent_id = agent_model_config()
+                evolution_key, evolution_id = evolution_model_config()
+                telemetry = LangSmithTelemetry(langsmith_config())
+                runner = CandidateRunner(store=store, config=config, history=history,
+                                         telemetry=telemetry, image=image)
+                controller = EvolutionController(
+                    store=store, history=history, config=config, telemetry=telemetry,
+                    repository=CandidateRepository(Path.cwd()), runner=runner,
+                    model_factory=lambda: OpenRouterModel(agent_key, agent_id),
+                    evolution_model=OpenRouterModel(evolution_key, evolution_id, timeout_seconds=120),
+                )
+                result = (controller.rescreen(args.run_id, args.rescreen_candidate)
+                          if args.rescreen_candidate else controller.evolve(args.run_id))
+                display = dict(result)
+                if "selection" in display:
+                    selection = dict(display["selection"])
+                    selection["trial_count"] = len(selection.pop("trials", []))
+                    display["selection"] = selection
+                _emit(display)
+                return 0 if result["status"] == "activated" else 1
             if args.command == "ui":
                 return _run_ui_command(args, store, config, history)
             task = json.loads(args.task) if args.task is not None else args.question
             if args.task is not None and not isinstance(task, dict):
                 raise ValueError("Task must be a JSON object")
             dataset = store.dataset_info(args.dataset)
-            table = store.open_session(args.dataset)
             api_key, model_id = agent_model_config()
             model = OpenRouterModel(api_key, model_id)
-            execution = RunExecutor(
-                history=history,
-                telemetry=LangSmithTelemetry(langsmith_config()),
-                config=config,
-            ).run(
-                model=model,
-                tools=AnalystTools(table, config),
-                dataset=dataset,
-                invocation=task,
-            )
+            active = history.active_version(config.task_family)
+            if active:
+                repository = CandidateRepository(Path.cwd())
+                source = repository.active_checkout(active["commit"])
+                execution = CandidateRunner(
+                    store=store, config=config, history=history,
+                    telemetry=LangSmithTelemetry(langsmith_config()), image=image,
+                ).run(source=source, source_commit=active["commit"], dataset=dataset,
+                      invocation=task, model=model)
+            else:
+                table = store.open_session(args.dataset)
+                execution = RunExecutor(
+                    history=history,
+                    telemetry=LangSmithTelemetry(langsmith_config()),
+                    config=config,
+                ).run(
+                    model=model, tools=AnalystTools(table, config), dataset=dataset,
+                    invocation=task,
+                )
             return _present_run(
                 execution.result,
                 conversational=args.question is not None,
                 json_output=args.json,
                 execution=execution,
             )
-    except (ValueError, KeyError, TypeError, json.JSONDecodeError, DatasetError, ScenarioError, OracleError, HistoryError) as exc:
+    except (ValueError, KeyError, TypeError, json.JSONDecodeError, DatasetError, ScenarioError, OracleError, HistoryError,
+            RunnerError, PatchRejected, PromotionRejected, EvolutionBlocked) as exc:
         _emit({"error": str(exc)})
         return 2
     except PyMongoError as exc:

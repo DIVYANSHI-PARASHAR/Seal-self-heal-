@@ -33,6 +33,11 @@ class EvaluationConfig:
     scenarios_path: Path
     max_generated_rows: int
     required_baseline_scenarios: tuple[str, ...]
+    max_patch_attempts: int = 3
+    validation_cases: int = 4
+    live_repetitions: int = 2
+    max_cost_ratio: float = 2.0
+    require_trace: bool = True
 
 
 @dataclass(frozen=True)
@@ -83,12 +88,22 @@ def load_config(path: Path = DEFAULT_CONFIG) -> AnalystConfig:
         scenarios_path=Path(evaluation_raw["scenarios_path"]),
         max_generated_rows=evaluation_raw["max_generated_rows"],
         required_baseline_scenarios=tuple(evaluation_raw["required_baseline_scenarios"]),
+        max_patch_attempts=evaluation_raw.get("max_patch_attempts", 3),
+        validation_cases=evaluation_raw.get("validation_cases", 4),
+        live_repetitions=evaluation_raw.get("live_repetitions", 2),
+        max_cost_ratio=evaluation_raw.get("max_cost_ratio", 2.0),
+        require_trace=evaluation_raw.get("require_trace", True),
     )
     if (
         not evaluation.oracle_version
         or evaluation.max_generated_rows <= 0
         or not evaluation.required_baseline_scenarios
         or any(not scenario_id for scenario_id in evaluation.required_baseline_scenarios)
+        or type(evaluation.max_patch_attempts) is not int or evaluation.max_patch_attempts < 1
+        or type(evaluation.validation_cases) is not int or evaluation.validation_cases < 3
+        or type(evaluation.live_repetitions) is not int or evaluation.live_repetitions < 1
+        or type(evaluation.max_cost_ratio) not in {int, float} or evaluation.max_cost_ratio < 1
+        or type(evaluation.require_trace) is not bool
     ):
         raise ValueError("Invalid evaluation configuration")
     return AnalystConfig(
@@ -120,6 +135,14 @@ def agent_model_config() -> tuple[str, str]:
     model = os.environ.get("OPENROUTER_AGENT_MODEL")
     if not key or not model:
         raise ValueError("OPENROUTER_API_KEY and OPENROUTER_AGENT_MODEL must be set")
+    return key, model
+
+
+def evolution_model_config() -> tuple[str, str]:
+    key = os.environ.get("OPENROUTER_API_KEY")
+    model = os.environ.get("OPENROUTER_EVOLUTION_MODEL")
+    if not key or not model:
+        raise ValueError("OPENROUTER_API_KEY and OPENROUTER_EVOLUTION_MODEL must be set")
     return key, model
 
 

@@ -2,6 +2,8 @@
 
 **Outcome:** an observed task limitation, including an explicit unsupported response, produces a validated, frozen eval and a real model-generated candidate change when the capability can be supplied safely.
 
+**Status:** Implemented and tested. A live bulk-data incident was replayed against the pinned baseline, frozen in Atlas, and sent to the configured evolution model. Three proposals were retained with their screening results. The proposals exposed a patch parser issue; standard unified diffs and corrected hunk counts are now supported. A rejected, uncommitted proposal can be re-screened without asking the model for another attempt. The recovered proposal was evaluated and rejected for correctness.
+
 ## Build
 
 1. Implement `src/self_heal/controller.py` to detect a task that missed its correctness or resource requirement, or returned `outcome=unsupported`. Query Atlas for capability-gap observations, load each linked LangSmith trace, retain the original question and reason, and pin the baseline commit. Confirm that the run was an explicit capability refusal rather than malformed model output, an empty result, or an infrastructure error. Exceptions also enter the diagnosis path. Record gaps that cannot yet be specified or independently graded; do not silently treat the conversational refusal as task success.
@@ -13,6 +15,8 @@
 ## Configuration
 
 Fill `OPENROUTER_EVOLUTION_MODEL` in `.env`. Build the configured Docker image once and start Docker before attempting generated-code evaluation. Keep the same `OPENROUTER_AGENT_MODEL` for old and new harness runs. Attempt limits and editable paths come from protected `config/analyst.yaml`, not candidate code.
+
+If a screening implementation bug rejects a stored diff, use `self-heal evolve --run-id <run-id> --rescreen-candidate <candidate-id>`. This applies the immutable stored diff to the same baseline, verifies frozen reproduction evidence, and records a linked candidate and full selection result. It cannot re-screen a candidate that already has a commit or selection result.
 
 ## Completion checks
 

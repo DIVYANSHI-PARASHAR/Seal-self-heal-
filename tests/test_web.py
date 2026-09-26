@@ -18,6 +18,9 @@ from self_heal.storage import AtlasHistoryStore
 from self_heal.table_store import AtlasTableStore
 from self_heal.telemetry import LangSmithTelemetry
 from self_heal.web import WebApplication, create_server
+from self_heal.execution import RunExecution
+from harness.agent import RunResult
+from self_heal.telemetry import TraceEvidence
 
 
 FIXTURE = Path(__file__).resolve().parents[1] / "evals" / "analyst" / "data" / "small_inventory.json"
@@ -154,6 +157,39 @@ def test_local_ui_records_unsupported_questions_as_capability_gaps():
         server.shutdown()
         thread.join(timeout=2)
         server.server_close()
+
+
+def test_new_ui_task_uses_the_active_pinned_version(monkeypatch):
+    application = make_application(supported_model)
+    application.history.active_versions.insert_one({
+        "_id": application.config.task_family, "commit": "accepted-commit",
+    })
+    observed = {}
+
+    def active_checkout(self, commit):
+        observed["commit"] = commit
+        return Path("/accepted")
+
+    def candidate_run(self, **kwargs):
+        observed["source"] = kwargs["source"]
+        observed["source_commit"] = kwargs["source_commit"]
+        return RunExecution(
+            RunResult("fresh", {"value": 18}, None, "answered",
+                      {"metric": "available", "filter_field": "warehouse", "filter_value": "East"},
+                      2, 1, 30, 0.1, 1, 100),
+            TraceEvidence(None, None, "disabled", "test", None, None),
+            "recorded",
+        )
+
+    monkeypatch.setattr("self_heal.web.CandidateRepository.active_checkout", active_checkout)
+    monkeypatch.setattr("self_heal.web.CandidateRunner.run", candidate_run)
+    status, payload = application.api("POST", "/api/runs", {
+        "dataset_id": "small", "question": "How many available units are in the East warehouse?",
+    })
+    assert status == 201
+    assert payload["answer"] == {"value": 18}
+    assert observed == {"commit": "accepted-commit", "source": Path("/accepted"),
+                        "source_commit": "accepted-commit"}
 
 
 def test_local_ui_rejects_malformed_run_requests(local_server):

@@ -2,7 +2,7 @@
 
 Self-Heal is one local application containing a custom analyst harness and a trusted supervisor. The harness evolves in response to task evidence; the supervisor runs separately so it can evaluate and start a new version without modifying an in-flight process.
 
-**Implementation status:** Phases 1 through 3 provide the Atlas table store, scoped table interface, OpenRouter model client, three-tool harness, local runner, explicit `unsupported` outcome, deterministic scenario generator, protected oracle, persisted LangSmith traces, and compact Atlas run/evaluation history. The local Phase 3 UI is an alternate view over that same trusted runner; it shows dataset metadata, results, resource measurements, compact history, capability gaps, and trace references without exposing table rows or raw trace payloads. Evolution supervision, candidate isolation, and promotion remain later-phase work.
+**Implementation status:** Phases 1–5 are implemented and locally tested. Incident diagnosis, model-proposed harness diffs, immutable selection plans, Docker execution, protected scoring, conditional activation, and rollback now exist. The operator UI and CLI use the active commit for new runs. A complete live model-generated promotion has not yet been verified; Phase 6 remains outstanding.
 
 ## Components
 

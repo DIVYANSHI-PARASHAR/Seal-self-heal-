@@ -191,7 +191,9 @@ def execution_identity(config: AnalystConfig, model: ChatModel) -> dict[str, Any
 
 
 def trace_metadata(
-    *, run_id: str, dataset: DatasetInfo, invocation: dict[str, Any] | str, config: AnalystConfig, model: ChatModel
+    *, run_id: str, dataset: DatasetInfo, invocation: dict[str, Any] | str, config: AnalystConfig, model: ChatModel,
+    source_commit: str | None = None,
+    runner_image_digest: str | None = None,
 ) -> dict[str, Any]:
     """Metadata suitable for a root trace; the telemetry redactor is the final gate."""
 
@@ -208,7 +210,8 @@ def trace_metadata(
         "contract_sha256": config.contract_hash,
         "model_id": model_record["id"],
         "model_settings_sha256": model_record["settings_hash"],
-        "source_commit": source_identity()["source"]["commit"],
+        "source_commit": source_commit or source_identity()["source"]["commit"],
+        "runner_image_digest": runner_image_digest,
         "question": record["question"],
         "question_hash": record["question_hash"],
     }
@@ -224,7 +227,14 @@ def build_run_start_record(
     started_at: datetime,
     case_id: str | None = None,
     case_exposure: str | None = None,
+    source_commit: str | None = None,
+    runner_image_digest: str | None = None,
 ) -> dict[str, Any]:
+    execution = execution_identity(config, model)
+    if source_commit is not None:
+        execution["source"] = {"commit": source_commit, "dirty": False, "dirty_patch_hash": None}
+    if runner_image_digest is not None:
+        execution["runtime"] = {"isolation": "docker", "image_digest": runner_image_digest}
     return {
         "_id": run_id,
         "run_id": run_id,
@@ -234,7 +244,7 @@ def build_run_start_record(
         "invocation": invocation_record(invocation, config),
         "dataset": dataset_record(dataset),
         "case": {"case_id": case_id, "exposure_role": case_exposure} if case_id else None,
-        "execution": execution_identity(config, model),
+        "execution": execution,
         "lifecycle": [{"state": "started", "at": started_at}],
     }
 

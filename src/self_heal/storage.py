@@ -26,6 +26,9 @@ class AtlasHistoryStore:
         self.candidates = database["candidates"]
         self.evaluations = database["evaluations"]
         self.versions = database["versions"]
+        self.active_versions = database["active_versions"]
+        self.gaps = database["capability_gaps"]
+        self.selection_plans = database["selection_plans"]
 
     def ensure_indexes(self) -> None:
         """Create the Phase 3 query paths without a duplicate event collection."""
@@ -45,6 +48,8 @@ class AtlasHistoryStore:
 
         self.candidates.create_index([("candidate_id", ASCENDING)], unique=True)
         self.candidates.create_index([("candidate_commit", ASCENDING)], unique=True, sparse=True)
+        self.candidates.create_index([("rescreen_of", ASCENDING)], unique=True, sparse=True)
+        self.candidates.create_index([("incident_run_id", ASCENDING), ("attempt", ASCENDING)])
         self.candidates.create_index(
             [("task_family", ASCENDING), ("changed_mechanism", ASCENDING), ("created_at", DESCENDING)]
         )
@@ -58,6 +63,8 @@ class AtlasHistoryStore:
         self.versions.create_index([("version_id", ASCENDING)], unique=True)
         self.versions.create_index([("identity_hash", ASCENDING)], unique=True, sparse=True)
         self.versions.create_index([("status", ASCENDING), ("created_at", DESCENDING)])
+        self.gaps.create_index([("run_id", ASCENDING)], unique=True)
+        self.selection_plans.create_index([("candidate_id", ASCENDING)], unique=True)
 
     def start_run(self, record: dict[str, Any]) -> None:
         self._require(record, "run_id", "_id")
@@ -105,8 +112,11 @@ class AtlasHistoryStore:
         self._require(record, "case_id", "_id", "task_family", "dataset", "oracle", "exposure")
         exposure = record.pop("exposure")
         try:
-            existing = self.eval_cases.find_one({"_id": record["_id"]}, {"_id": 1})
+            existing = self.eval_cases.find_one({"_id": record["_id"]})
             if existing:
+                immutable = {key: value for key, value in record.items() if key not in {"exposure", "exposures"}}
+                if any(existing.get(key) != value for key, value in immutable.items() if key != "created_at"):
+                    raise HistoryError("Frozen evaluation case conflicts with existing case")
                 self.eval_cases.update_one({"_id": record["_id"]}, {"$push": {"exposures": exposure}})
             else:
                 record["exposures"] = [exposure]
@@ -121,6 +131,69 @@ class AtlasHistoryStore:
     def record_evaluation(self, record: dict[str, Any]) -> None:
         self._require(record, "evaluation_id", "trial_id", "_id", "run_id", "case_id", "created_at")
         self._insert(self.evaluations, record, "evaluation")
+
+    def get_eval_case(self, case_id: str) -> dict[str, Any] | None:
+        return self.eval_cases.find_one({"_id": case_id})
+
+    def add_case_exposure(self, case_id: str, *, role: str, source: str, at: datetime) -> None:
+        result = self.eval_cases.update_one(
+            {"_id": case_id}, {"$push": {"exposures": {"role": role, "source": source, "at": at}}}
+        )
+        if result.matched_count != 1:
+            raise HistoryError("Evaluation case is unavailable")
+
+    def record_gap(self, record: dict[str, Any]) -> None:
+        self._require(record, "_id", "run_id", "status", "created_at")
+        self._insert(self.gaps, record, "capability gap")
+
+    def get_gap(self, run_id: str) -> dict[str, Any] | None:
+        return self.gaps.find_one({"_id": run_id})
+
+    def update_gap(self, run_id: str, *, status: str, reason: str, proposal: dict[str, Any] | None = None) -> None:
+        patch = {"status": status, "reason": reason, "updated_at": datetime.now().astimezone()}
+        if proposal is not None:
+            patch["proposal"] = proposal
+        result = self.gaps.update_one({"_id": run_id}, {"$set": patch})
+        if result.matched_count != 1:
+            raise HistoryError("Capability gap is unavailable")
+
+    def record_selection_plan(self, record: dict[str, Any]) -> None:
+        self._require(record, "_id", "candidate_id", "candidate_commit", "config_hash", "cases", "created_at")
+        self._insert(self.selection_plans, record, "selection plan")
+
+    def record_candidate_result(self, candidate_id: str, result: dict[str, Any]) -> None:
+        try:
+            changed = self.candidates.update_one(
+                {"_id": candidate_id, "selection": {"$exists": False}}, {"$set": {"selection": result}}
+            )
+        except PyMongoError as exc:
+            raise HistoryError("Could not store candidate selection") from exc
+        if changed.matched_count != 1:
+            raise HistoryError("Candidate selection is missing or already recorded")
+
+    def active_version(self, task_family: str) -> dict[str, Any] | None:
+        return self.active_versions.find_one({"_id": task_family})
+
+    def compare_and_swap_active(
+        self, *, task_family: str, expected_parent: str, commit: str, evidence_id: str,
+        environment_hash: str, at: datetime
+    ) -> bool:
+        """Activate only the tested child of the current version."""
+        patch = {"commit": commit, "evidence_id": evidence_id, "environment_hash": environment_hash, "updated_at": at}
+        try:
+            current = self.active_versions.find_one({"_id": task_family})
+            if current is None:
+                self.active_versions.insert_one({"_id": task_family, **patch, "previous_commit": expected_parent})
+                return True
+            changed = self.active_versions.update_one(
+                {"_id": task_family, "commit": expected_parent},
+                {"$set": {**patch, "previous_commit": expected_parent}},
+            )
+            return changed.modified_count == 1
+        except DuplicateKeyError:
+            return False
+        except PyMongoError as exc:
+            raise HistoryError("Could not activate version") from exc
 
     def record_candidate(self, record: dict[str, Any]) -> None:
         record = dict(record)

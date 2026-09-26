@@ -38,5 +38,10 @@ evaluation:
     - small-east-available
     - edge-empty-sku
     - bulk-warehouse-available
+  max_patch_attempts: 3
+  validation_cases: 4
+  live_repetitions: 2
+  max_cost_ratio: 2.0
+  require_trace: true
 
 editable_paths: [harness/]

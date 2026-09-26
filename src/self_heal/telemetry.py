@@ -253,6 +253,19 @@ class TracedTools:
                 return self._tools.execute(name, arguments)
             raise
 
+    def record_remote_tool(self, name: str, arguments: dict[str, Any], result: dict[str, Any]) -> None:
+        """Record an isolated candidate's tool envelope without executing it again."""
+        try:
+            context = self._trace_factory(
+                f"tool.{name}", run_type="tool", client=self._client,
+                project_name=self._project, inputs={"name": name, "arguments": arguments},
+                metadata=self._metadata, enabled=True,
+            )
+            with context as span:
+                _end_span(span, {"result": result})
+        except Exception as exc:
+            self._mark_incomplete(exc)
+
 
 def _end_span(span: Any, outputs: dict[str, Any]) -> None:
     end = getattr(span, "end", None)
@@ -293,6 +306,22 @@ class LangSmithTelemetry:
         self._wrap_openai_fn = wrap_openai_fn
         self._verification_attempts = verification_attempts
         self._retry_delay_seconds = retry_delay_seconds
+
+    def read_redacted_trace(self, trace_id: str) -> list[dict[str, Any]]:
+        """Fetch only the incident tree needed for diagnosis, then redact again."""
+        if not self._config.enabled or not self._config.api_key:
+            raise LookupError("LangSmith trace access is not configured")
+        client_factory, _, _ = self._dependencies()
+        client = client_factory(api_key=self._config.api_key, workspace_id=self._config.workspace_id,
+                                timeout_ms=10000)
+        runs = list(client.list_runs(project_name=self._config.project, trace_id=trace_id, limit=100))
+        if not runs or not any(str(getattr(run, "id", "")) == trace_id for run in runs):
+            raise LookupError("Incident trace is unavailable")
+        return [redact_trace_payload({
+            "name": getattr(run, "name", None), "run_type": getattr(run, "run_type", None),
+            "inputs": getattr(run, "inputs", None), "outputs": getattr(run, "outputs", None),
+            "error": getattr(run, "error", None),
+        }) for run in runs]
 
     def execute(
         self,

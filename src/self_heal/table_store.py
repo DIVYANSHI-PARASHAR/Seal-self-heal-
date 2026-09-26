@@ -112,6 +112,13 @@ class AtlasTableStore:
             content_hash=metadata["content_hash"],
         )
 
+    def verified_rows(self, dataset_id: str) -> list[dict[str, Any]]:
+        """Protected oracle input; never pass this list to a proposal or runner."""
+        self.dataset_info(dataset_id)
+        return [doc["row"] for doc in self._rows.find(
+            {"dataset_id": dataset_id}, {"_id": 0, "row": 1}
+        ).sort("position", ASCENDING)]
+
     def list_dataset_info(self) -> list[DatasetInfo]:
         """List ready dataset metadata without exposing any table rows.
 

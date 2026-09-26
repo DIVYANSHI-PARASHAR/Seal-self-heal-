@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import os
 import sysconfig
 from collections.abc import Callable
 from datetime import date, datetime
@@ -27,6 +28,8 @@ from self_heal.settings import AnalystConfig, LangSmithConfig
 from self_heal.storage import AtlasHistoryStore
 from self_heal.table_store import AtlasTableStore, DatasetError, DatasetInfo
 from self_heal.telemetry import LangSmithTelemetry
+from self_heal.repository import CandidateRepository
+from self_heal.runner import CandidateRunner
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -178,6 +181,15 @@ class WebApplication:
 
     def _run(self, request: dict[str, str]) -> tuple[RunExecution, DatasetInfo]:
         dataset = self.store.dataset_info(request["dataset_id"])
+        active = self.history.active_version(self.config.task_family)
+        if active:
+            source = CandidateRepository(PROJECT_ROOT).active_checkout(active["commit"])
+            execution = CandidateRunner(
+                store=self.store, config=self.config, history=self.history, telemetry=self.telemetry,
+                image=os.environ.get("SELF_HEAL_RUNNER_IMAGE", "self-heal-runner:local"),
+            ).run(source=source, source_commit=active["commit"], dataset=dataset,
+                  invocation=request["question"], model=self.model_factory())
+            return execution, dataset
         table = self.store.open_session(dataset.dataset_id)
         execution = RunExecutor(history=self.history, telemetry=self.telemetry, config=self.config).run(
             model=self.model_factory(),

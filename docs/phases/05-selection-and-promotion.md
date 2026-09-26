@@ -2,6 +2,8 @@
 
 **Outcome:** only a candidate that improves the task within fixed limits and preserves prior behavior becomes the version used for fresh work.
 
+**Status:** Implemented and tested. Frozen selection plans, repeated original/private trials, regression and refusal gates, exact-commit activation, active-version routing, and rollback have automated coverage. A live model-generated proposal completed 28 selection trials and was rejected for failing original, generated, regression, and private validation cases. The active version remains unchanged.
+
 ## Build
 
 1. Extend `src/self_heal/evaluation.py` to evaluate the original incident case, every existing regression, and several fresh private validation cases. For a capability-gap incident, preserve the original natural-language request and verify that the baseline explicitly returns `unsupported` while the candidate gives the independently expected answer; include paraphrases and different Atlas data so the new capability is reusable. Generate and materialize new immutable Atlas datasets independently of the proposed patch, with different row order, group counts, fields, filters, values, empty groups, and invalid rows. Freeze their dataset IDs/hashes, the candidate's exact commit, and the evaluation plan before running it.

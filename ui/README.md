@@ -1,8 +1,9 @@
 # Self-Heal local UI
 
-This interface is a local operator surface for the implemented Phase 3 system. It uses the same
-trusted `RunExecutor` as `self-heal run`: an analysis reads only its selected Atlas dataset,
-records compact run history, and optionally links a verified LangSmith root trace.
+This interface is a local operator surface for the implemented system. It uses the same
+trusted execution path as `self-heal run`: an analysis reads only its selected Atlas dataset,
+records compact run history, and optionally links a verified LangSmith root trace. Once a
+version is active, both surfaces execute that pinned commit in Docker.
 
 Start it from the repository root after configuring `.env` and materializing a dataset:
 
@@ -16,5 +17,4 @@ use `--host` and `--port` only when an explicitly different local setup is requi
 
 The UI shows only metadata, compact history, resource measurements, and the LangSmith trace link.
 It does not expose raw table rows or detailed trace payloads. Candidate proposal, protected
-evaluation, and version promotion UI remain Phase 4+ work and are intentionally not represented
-as completed functionality.
+evaluation and version promotion controls remain CLI operations.
