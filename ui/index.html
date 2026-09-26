@@ -12,7 +12,7 @@
   </head>
   <body>
     <div class="app-shell">
-      <header class="topbar">
+      <aside class="sidebar">
         <button class="brand" type="button" data-nav="ask" aria-label="Go to new analysis">
           <svg class="brand-mark" viewBox="0 0 28 28" aria-hidden="true">
             <path d="M4 4h9v9H4zM15 15h9v9h-9zM15 4h5a4 4 0 0 1 4 4v5h-9zM4 15h9v9H8a4 4 0 0 1-4-4z" />
@@ -20,26 +20,44 @@
           <span>Self-Heal</span>
         </button>
 
-        <nav class="top-nav" aria-label="Primary navigation">
-          <button class="top-nav-link is-current" type="button" data-nav="ask">New analysis</button>
-          <button class="top-nav-link" type="button" data-nav="run" data-tab="result">Runs</button>
+        <button class="workspace-switcher" type="button" aria-label="Current workspace">
+          Hackathon workspace
+          <span aria-hidden="true">⌄</span>
+        </button>
+
+        <nav class="sidebar-nav" aria-label="Primary navigation">
+          <button class="sidebar-link is-current" type="button" data-nav="ask">
+            <span class="nav-icon" aria-hidden="true">⌁</span>
+            Analyze
+          </button>
+          <button class="sidebar-link" type="button" data-nav="run" data-tab="result">
+            <span class="nav-icon" aria-hidden="true">◷</span>
+            Runs
+          </button>
         </nav>
 
-        <div class="topbar-actions">
-          <span class="preview-label">Demo preview</span>
-          <span class="avatar" aria-label="Signed in as DM">DM</span>
+        <div class="service-status" aria-label="Connected services">
+          <span>Atlas connected</span>
+          <span>LangSmith connected</span>
         </div>
-      </header>
+      </aside>
 
-      <main>
+      <div class="page-shell">
+        <header class="mobile-bar">
+          <button class="brand" type="button" data-nav="ask" aria-label="Go to new analysis">
+            <svg class="brand-mark" viewBox="0 0 28 28" aria-hidden="true">
+              <path d="M4 4h9v9H4zM15 15h9v9h-9zM15 4h5a4 4 0 0 1 4 4v5h-9zM4 15h9v9H8a4 4 0 0 1-4-4z" />
+            </svg>
+            <span>Self-Heal</span>
+          </button>
+          <button class="mobile-runs" type="button" data-nav="run" data-tab="result">Runs</button>
+        </header>
+
+        <main>
         <section class="ask-view" data-view="ask">
           <div class="ask-intro">
-            <p class="eyebrow">Inventory analyst</p>
             <h1>What would you like to analyze?</h1>
-            <p class="lede">
-              Ask a structured inventory question. Self-Heal keeps the task, data, and
-              limits fixed while it evaluates a proposed improvement.
-            </p>
+            <p class="lede">Ask a question about your inventory data.</p>
           </div>
 
           <form class="analysis-form" id="analysis-form">
@@ -55,48 +73,37 @@
             <textarea id="question" name="question" rows="4">What are the available units in each warehouse?</textarea>
 
             <div class="form-footer">
-              <p>The base analyst starts with basic tools.</p>
+              <p>Starts with basic tools.</p>
               <button class="primary-button" type="submit">
                 <span>Run agent</span>
                 <span aria-hidden="true">→</span>
               </button>
             </div>
           </form>
-
-          <div class="guardrail" role="note">
-            <span class="guardrail-label">How this stays safe</span>
-            <p>
-              A new capability is only used after the same task, existing regressions,
-              and fresh validation cases pass.
-            </p>
-          </div>
         </section>
 
         <section class="run-view" data-view="run" hidden>
           <div class="run-heading">
             <button class="back-link" type="button" data-nav="ask">
               <span aria-hidden="true">←</span>
-              Back to new analysis
+              Analyze
             </button>
             <div class="run-title-row">
               <div>
-                <p class="eyebrow">Run details <span class="demo-tag">Illustrative</span></p>
-                <h1>Warehouse availability by warehouse</h1>
+                <h1>Warehouse availability</h1>
               </div>
-              <span class="quiet-status">Candidate evaluated</span>
             </div>
             <div class="run-meta">
-              <span><strong>Run ID</strong> run_bulk_01H8K7</span>
+              <span>run_bulk_01H8K7</span>
               <button class="copy-button" type="button" data-copy-run-id>Copy ID</button>
               <span class="meta-divider" aria-hidden="true"></span>
-              <span><strong>Harness version</strong> v1 → v2</span>
+              <span>v1 → v2</span>
             </div>
           </div>
 
           <div class="task-summary">
-            <span class="summary-label">Question</span>
             <p id="run-question">What are the available units in each warehouse?</p>
-            <span class="summary-label summary-dataset">Bulk inventory · 512 rows</span>
+            <span class="summary-dataset">Bulk inventory · 512 rows</span>
           </div>
 
           <div class="tab-scroller">
@@ -159,22 +166,13 @@
             aria-labelledby="failure-tab"
             data-panel="failure"
           >
-            <div class="panel-intro">
-              <p class="eyebrow">Observed limitation</p>
-              <h2>The base agent could not finish this task.</h2>
-              <p>
-                It reached the fixed model-call budget before it could read enough rows
-                to produce a complete grouped answer.
-              </p>
-            </div>
+            <p class="stage-title">Call limit reached before a complete answer.</p>
 
             <div class="evidence-line">
               <div>
-                <span class="evidence-label">Outcome</span>
                 <strong>model_call_budget_exhausted</strong>
               </div>
               <div>
-                <span class="evidence-label">Evidence</span>
                 <strong>8 model calls · 7 table pages · 28 / 512 rows read</strong>
               </div>
             </div>
@@ -202,23 +200,16 @@ model_call_budget_exhausted</pre>
             data-panel="changes"
             hidden
           >
-            <div class="panel-intro">
-              <p class="eyebrow">Bounded proposal</p>
-              <h2>Add a reusable aggregation capability.</h2>
-              <p>
-                The proposal changes only the editable harness so it can summarize the
-                permitted rows instead of repeatedly asking the model to page through them.
-              </p>
-            </div>
+            <p class="stage-title">Aggregation added for grouped inventory totals.</p>
 
             <div class="change-callout">
               <div>
-                <span class="evidence-label">Proposed tool</span>
+                <span class="evidence-label">New tool</span>
                 <code>aggregate_inventory(group_by="warehouse", metric="available")</code>
               </div>
               <div>
-                <span class="evidence-label">Context policy</span>
-                <p>Return grouped summaries rather than repeated raw row pages.</p>
+                <span class="evidence-label">Context</span>
+                <p>Grouped summaries replace repeated row pages.</p>
               </div>
             </div>
 
@@ -245,11 +236,7 @@ model_call_budget_exhausted</pre>
             data-panel="evaluations"
             hidden
           >
-            <div class="panel-intro">
-              <p class="eyebrow">Protected checks</p>
-              <h2>The exact candidate is evaluated before it can be selected.</h2>
-              <p>Each check remains separate, so a good result on one case cannot hide a regression elsewhere.</p>
-            </div>
+            <p class="stage-title">Protected checks passed.</p>
 
             <div class="evaluation-list" aria-label="Evaluation results">
               <div class="evaluation-row">
@@ -296,14 +283,6 @@ model_call_budget_exhausted</pre>
             data-panel="result"
             hidden
           >
-            <div class="panel-intro result-intro">
-              <div>
-                <p class="eyebrow">Same task · fixed limits</p>
-                <h2>Clear evidence of one bounded improvement.</h2>
-              </div>
-              <span class="quiet-status">Illustrative v2</span>
-            </div>
-
             <div class="comparison-grid">
               <article class="comparison-card">
                 <div class="comparison-heading">
@@ -360,17 +339,12 @@ model_call_budget_exhausted</pre>
             </div>
 
             <p class="result-note">
-              Demo state based on the checked-in bulk evaluation. The aggregation tool and
-              promotion flow are planned product stages, not currently wired to the Python CLI.
+              Demo flow — v2 is not yet wired to the Python CLI.
             </p>
           </section>
         </section>
-      </main>
-
-      <footer class="app-footer">
-        <span>Self-Heal · bounded improvement for inventory analysis</span>
-        <span>UI demo grounded in the Phase 1–2 evaluation contract</span>
-      </footer>
+        </main>
+      </div>
     </div>
 
     <script src="./app.js"></script>
