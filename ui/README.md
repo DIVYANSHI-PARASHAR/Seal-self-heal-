@@ -1,8 +1,9 @@
 # Self-Heal local UI
 
 This interface is a local operator surface for the implemented Phase 3 system. It uses the same
-trusted `RunExecutor` as `self-heal run`: an analysis reads only its selected Atlas dataset,
-records compact run history, and optionally links a verified LangSmith root trace.
+trusted `RunExecutor` as `self-heal run`: an analysis reads only its automatically selected
+operator Atlas dataset, records compact run history, and optionally links a verified LangSmith
+root trace. When a user-facing dataset is available, it is preferred over `eval-` fixtures.
 
 Start it from the repository root after configuring `.env` and materializing a dataset:
 

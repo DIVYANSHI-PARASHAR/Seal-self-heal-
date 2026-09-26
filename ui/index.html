@@ -20,11 +20,6 @@
           <span>Self-Heal</span>
         </button>
 
-        <div class="workspace-switcher" aria-label="Current workspace">
-          Local operator workspace
-          <span aria-hidden="true">⌄</span>
-        </div>
-
         <nav class="sidebar-nav" aria-label="Primary navigation">
           <button class="sidebar-link is-current" type="button" data-nav="ask">
             <span class="nav-icon" aria-hidden="true">⌁</span>
@@ -36,10 +31,6 @@
           </button>
         </nav>
 
-        <div class="service-status" aria-label="Connected services">
-          <span data-atlas-status>Atlas checking…</span>
-          <span data-langsmith-status>LangSmith checking…</span>
-        </div>
       </aside>
 
       <div class="page-shell">
@@ -57,14 +48,13 @@
           <section class="ask-view" data-view="ask">
             <div class="ask-intro">
               <h1>What would you like to analyze?</h1>
-              <p class="lede">Run an inventory question against an Atlas-backed dataset. Every run retains compact Phase 3 evidence.</p>
             </div>
 
             <form class="analysis-form" id="analysis-form">
-              <div class="form-row">
-                <label for="dataset">Dataset</label>
-                <select id="dataset" name="dataset" disabled>
-                  <option>Loading available datasets…</option>
+              <div class="form-row example-question-row">
+                <label for="example-question">Try an example</label>
+                <select id="example-question" name="example-question">
+                  <option value="">Custom question</option>
                 </select>
               </div>
 
@@ -72,7 +62,6 @@
               <textarea id="question" name="question" rows="4" required maxlength="2000" placeholder="For example: How many available units are in the East warehouse?"></textarea>
 
               <div class="form-footer">
-                <p id="form-status">Uses the same bounded agent, Atlas history, and optional LangSmith tracing as the CLI.</p>
                 <button class="primary-button" type="submit" disabled data-run-button>
                   <span>Run agent</span>
                   <span aria-hidden="true">→</span>

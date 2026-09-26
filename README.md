@@ -10,10 +10,11 @@ MongoDB Atlas will hold the structured analyst tables and compact run, case, can
 
 ## Use the local operator UI
 
-The Phase 3 UI is a browser view over the same trusted execution path as the CLI. It lists ready
-Atlas datasets, runs an inventory question, displays the result and measured resource use, links
-to verified LangSmith evidence when available, and lets an operator revisit compact run history
-or recorded capability gaps. It does not claim Phase 4 proposal, evaluation, or promotion work.
+The Phase 3 UI is a browser view over the same trusted execution path as the CLI. It automatically
+chooses a ready operator dataset (preferring a non-evaluation table), runs an inventory question,
+displays the result and measured resource use, links to verified LangSmith evidence when available,
+and lets an operator revisit compact run history or recorded capability gaps. It does not claim
+Phase 4 proposal, evaluation, or promotion work.
 
 Materialize a dataset, then start the loopback-only server:
 

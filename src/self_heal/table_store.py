@@ -115,9 +115,10 @@ class AtlasTableStore:
     def list_dataset_info(self) -> list[DatasetInfo]:
         """List ready dataset metadata without exposing any table rows.
 
-        The local UI uses this to populate its dataset picker.  It deliberately
-        avoids opening a table session, so a browser request cannot read data
-        outside a separately authorized analyst run.
+        The local UI uses this metadata to choose its operator dataset without
+        exposing a picker. It deliberately avoids opening a table session, so
+        a browser request cannot read data outside a separately authorized
+        analyst run.
         """
 
         records = self._datasets.find(
