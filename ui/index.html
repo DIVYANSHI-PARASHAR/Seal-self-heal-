@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="A lightweight Self-Heal product UI demo for the inventory analyst."
+    />
+    <title>Self-Heal · Inventory analyst</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <button class="brand" type="button" data-nav="ask" aria-label="Go to new analysis">
+          <svg class="brand-mark" viewBox="0 0 28 28" aria-hidden="true">
+            <path d="M4 4h9v9H4zM15 15h9v9h-9zM15 4h5a4 4 0 0 1 4 4v5h-9zM4 15h9v9H8a4 4 0 0 1-4-4z" />
+          </svg>
+          <span>Self-Heal</span>
+        </button>
+
+        <nav class="top-nav" aria-label="Primary navigation">
+          <button class="top-nav-link is-current" type="button" data-nav="ask">New analysis</button>
+          <button class="top-nav-link" type="button" data-nav="run" data-tab="result">Runs</button>
+        </nav>
+
+        <div class="topbar-actions">
+          <span class="preview-label">Demo preview</span>
+          <span class="avatar" aria-label="Signed in as DM">DM</span>
+        </div>
+      </header>
+
+      <main>
+        <section class="ask-view" data-view="ask">
+          <div class="ask-intro">
+            <p class="eyebrow">Inventory analyst</p>
+            <h1>What would you like to analyze?</h1>
+            <p class="lede">
+              Ask a structured inventory question. Self-Heal keeps the task, data, and
+              limits fixed while it evaluates a proposed improvement.
+            </p>
+          </div>
+
+          <form class="analysis-form" id="analysis-form">
+            <div class="form-row">
+              <label for="dataset">Dataset</label>
+              <select id="dataset" name="dataset">
+                <option value="bulk">Bulk inventory · 512 rows</option>
+                <option value="small">Small inventory · 6 rows</option>
+              </select>
+            </div>
+
+            <label class="field-label" for="question">Your question</label>
+            <textarea id="question" name="question" rows="4">What are the available units in each warehouse?</textarea>
+
+            <div class="form-footer">
+              <p>The base analyst starts with basic tools.</p>
+              <button class="primary-button" type="submit">
+                <span>Run agent</span>
+                <span aria-hidden="true">→</span>
+              </button>
+            </div>
+          </form>
+
+          <div class="guardrail" role="note">
+            <span class="guardrail-label">How this stays safe</span>
+            <p>
+              A new capability is only used after the same task, existing regressions,
+              and fresh validation cases pass.
+            </p>
+          </div>
+        </section>
+
+        <section class="run-view" data-view="run" hidden>
+          <div class="run-heading">
+            <button class="back-link" type="button" data-nav="ask">
+              <span aria-hidden="true">←</span>
+              Back to new analysis
+            </button>
+            <div class="run-title-row">
+              <div>
+                <p class="eyebrow">Run details <span class="demo-tag">Illustrative</span></p>
+                <h1>Warehouse availability by warehouse</h1>
+              </div>
+              <span class="quiet-status">Candidate evaluated</span>
+            </div>
+            <div class="run-meta">
+              <span><strong>Run ID</strong> run_bulk_01H8K7</span>
+              <button class="copy-button" type="button" data-copy-run-id>Copy ID</button>
+              <span class="meta-divider" aria-hidden="true"></span>
+              <span><strong>Harness version</strong> v1 → v2</span>
+            </div>
+          </div>
+
+          <div class="task-summary">
+            <span class="summary-label">Question</span>
+            <p id="run-question">What are the available units in each warehouse?</p>
+            <span class="summary-label summary-dataset">Bulk inventory · 512 rows</span>
+          </div>
+
+          <div class="tab-scroller">
+            <div class="tabs" role="tablist" aria-label="Run stages">
+              <button
+                class="tab is-active"
+                id="failure-tab"
+                type="button"
+                role="tab"
+                aria-selected="true"
+                aria-controls="failure-panel"
+                data-tab="failure"
+              >
+                <span class="tab-check" aria-hidden="true">✓</span>
+                Failure
+              </button>
+              <button
+                class="tab"
+                id="changes-tab"
+                type="button"
+                role="tab"
+                aria-selected="false"
+                aria-controls="changes-panel"
+                data-tab="changes"
+              >
+                <span class="tab-check" aria-hidden="true">✓</span>
+                Changes
+              </button>
+              <button
+                class="tab"
+                id="evaluations-tab"
+                type="button"
+                role="tab"
+                aria-selected="false"
+                aria-controls="evaluations-panel"
+                data-tab="evaluations"
+              >
+                <span class="tab-check" aria-hidden="true">✓</span>
+                Evaluations
+              </button>
+              <button
+                class="tab"
+                id="result-tab"
+                type="button"
+                role="tab"
+                aria-selected="false"
+                aria-controls="result-panel"
+                data-tab="result"
+              >
+                <span class="tab-check" aria-hidden="true">✓</span>
+                Result
+              </button>
+            </div>
+          </div>
+
+          <section
+            class="tab-panel"
+            id="failure-panel"
+            role="tabpanel"
+            aria-labelledby="failure-tab"
+            data-panel="failure"
+          >
+            <div class="panel-intro">
+              <p class="eyebrow">Observed limitation</p>
+              <h2>The base agent could not finish this task.</h2>
+              <p>
+                It reached the fixed model-call budget before it could read enough rows
+                to produce a complete grouped answer.
+              </p>
+            </div>
+
+            <div class="evidence-line">
+              <div>
+                <span class="evidence-label">Outcome</span>
+                <strong>model_call_budget_exhausted</strong>
+              </div>
+              <div>
+                <span class="evidence-label">Evidence</span>
+                <strong>8 model calls · 7 table pages · 28 / 512 rows read</strong>
+              </div>
+            </div>
+
+            <details class="disclosure">
+              <summary>Show raw trace excerpt</summary>
+              <pre>inspect_table()
+read_rows(offset=0, limit=4)
+read_rows(offset=4, limit=4)
+...
+model_call_budget_exhausted</pre>
+            </details>
+
+            <button class="secondary-button" type="button" data-tab="changes">
+              Review proposed change
+              <span aria-hidden="true">→</span>
+            </button>
+          </section>
+
+          <section
+            class="tab-panel"
+            id="changes-panel"
+            role="tabpanel"
+            aria-labelledby="changes-tab"
+            data-panel="changes"
+            hidden
+          >
+            <div class="panel-intro">
+              <p class="eyebrow">Bounded proposal</p>
+              <h2>Add a reusable aggregation capability.</h2>
+              <p>
+                The proposal changes only the editable harness so it can summarize the
+                permitted rows instead of repeatedly asking the model to page through them.
+              </p>
+            </div>
+
+            <div class="change-callout">
+              <div>
+                <span class="evidence-label">Proposed tool</span>
+                <code>aggregate_inventory(group_by="warehouse", metric="available")</code>
+              </div>
+              <div>
+                <span class="evidence-label">Context policy</span>
+                <p>Return grouped summaries rather than repeated raw row pages.</p>
+              </div>
+            </div>
+
+            <details class="disclosure">
+              <summary>Show candidate diff</summary>
+              <pre>+ def aggregate_inventory(group_by, metric):
+    rows = read_permitted_rows()
+    return group_and_sum(rows, group_by, metric)
+
++ context.append(grouped_summary)</pre>
+            </details>
+
+            <button class="secondary-button" type="button" data-tab="evaluations">
+              See protected evaluations
+              <span aria-hidden="true">→</span>
+            </button>
+          </section>
+
+          <section
+            class="tab-panel"
+            id="evaluations-panel"
+            role="tabpanel"
+            aria-labelledby="evaluations-tab"
+            data-panel="evaluations"
+            hidden
+          >
+            <div class="panel-intro">
+              <p class="eyebrow">Protected checks</p>
+              <h2>The exact candidate is evaluated before it can be selected.</h2>
+              <p>Each check remains separate, so a good result on one case cannot hide a regression elsewhere.</p>
+            </div>
+
+            <div class="evaluation-list" aria-label="Evaluation results">
+              <div class="evaluation-row">
+                <div>
+                  <strong>Original reproduction</strong>
+                  <span>512-row warehouse grouping task</span>
+                </div>
+                <span class="row-result">Pass</span>
+              </div>
+              <div class="evaluation-row">
+                <div>
+                  <strong>Existing regressions</strong>
+                  <span>Small success and edge cases</span>
+                </div>
+                <span class="row-result">Pass</span>
+              </div>
+              <div class="evaluation-row">
+                <div>
+                  <strong>Fresh validation</strong>
+                  <span>New in-family cases held outside proposal</span>
+                </div>
+                <span class="row-result">Pass</span>
+              </div>
+              <div class="evaluation-row assessment">
+                <div>
+                  <strong>Untouched assessment</strong>
+                  <span>Separate final measure · not used in selection</span>
+                </div>
+                <span class="row-result">Pass</span>
+              </div>
+            </div>
+
+            <button class="secondary-button" type="button" data-tab="result">
+              View the before and after
+              <span aria-hidden="true">→</span>
+            </button>
+          </section>
+
+          <section
+            class="tab-panel result-panel"
+            id="result-panel"
+            role="tabpanel"
+            aria-labelledby="result-tab"
+            data-panel="result"
+            hidden
+          >
+            <div class="panel-intro result-intro">
+              <div>
+                <p class="eyebrow">Same task · fixed limits</p>
+                <h2>Clear evidence of one bounded improvement.</h2>
+              </div>
+              <span class="quiet-status">Illustrative v2</span>
+            </div>
+
+            <div class="comparison-grid">
+              <article class="comparison-card">
+                <div class="comparison-heading">
+                  <div>
+                    <span class="comparison-label">Before</span>
+                    <h3>v1</h3>
+                  </div>
+                  <span class="card-status">Incomplete</span>
+                </div>
+                <p class="comparison-lede">Call budget reached before a complete answer.</p>
+                <dl class="metric-list">
+                  <div>
+                    <dt>Method</dt>
+                    <dd>Bounded page reads</dd>
+                  </div>
+                  <div>
+                    <dt>Progress</dt>
+                    <dd>28 of 512 rows read</dd>
+                  </div>
+                  <div>
+                    <dt>Answer</dt>
+                    <dd>No complete result</dd>
+                  </div>
+                </dl>
+              </article>
+
+              <article class="comparison-card after-card">
+                <div class="comparison-heading">
+                  <div>
+                    <span class="comparison-label">After</span>
+                    <h3>v2</h3>
+                  </div>
+                  <span class="card-status">Exact answer</span>
+                </div>
+                <p class="comparison-lede">Aggregation tool used within the same task limits.</p>
+                <div class="result-table-wrap">
+                  <table>
+                    <caption class="sr-only">Available units by warehouse</caption>
+                    <thead>
+                      <tr>
+                        <th scope="col">Warehouse</th>
+                        <th scope="col">Available</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr><td>East</td><td>3,317</td></tr>
+                      <tr><td>North</td><td>3,570</td></tr>
+                      <tr><td>South</td><td>2,824</td></tr>
+                      <tr><td>West</td><td>3,367</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </article>
+            </div>
+
+            <p class="result-note">
+              Demo state based on the checked-in bulk evaluation. The aggregation tool and
+              promotion flow are planned product stages, not currently wired to the Python CLI.
+            </p>
+          </section>
+        </section>
+      </main>
+
+      <footer class="app-footer">
+        <span>Self-Heal · bounded improvement for inventory analysis</span>
+        <span>UI demo grounded in the Phase 1–2 evaluation contract</span>
+      </footer>
+    </div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
