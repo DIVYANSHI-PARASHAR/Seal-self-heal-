@@ -24,7 +24,9 @@ def _parser() -> argparse.ArgumentParser:
     seed = subcommands.add_parser("seed", help="Materialize an immutable table in Atlas")
     seed.add_argument("--fixture", required=True, type=Path, help="JSON dataset definition")
     run = subcommands.add_parser("run", help="Run an analyst task against an Atlas dataset")
-    run.add_argument("--task", required=True, help="JSON task object")
+    task_input = run.add_mutually_exclusive_group(required=True)
+    task_input.add_argument("--task", help="JSON task object for reproducible runs")
+    task_input.add_argument("--question", help="Natural-language question about the assigned table")
     run.add_argument("--dataset", required=True, help="Dataset ID to bind to this run")
     return parser
 
@@ -47,8 +49,8 @@ def main(argv: list[str] | None = None) -> int:
                 info = store.materialize(fixture["dataset_id"], fixture["rows"])
                 _emit({"dataset_id": info.dataset_id, "row_count": info.row_count, "content_hash": info.content_hash})
                 return 0
-            task = json.loads(args.task)
-            if not isinstance(task, dict):
+            task = json.loads(args.task) if args.task is not None else args.question
+            if args.task is not None and not isinstance(task, dict):
                 raise ValueError("Task must be a JSON object")
             table = store.open_session(args.dataset)
             api_key, model_id = agent_model_config()
@@ -59,6 +61,7 @@ def main(argv: list[str] | None = None) -> int:
                     "run_id": result.run_id,
                     "answer": result.answer,
                     "error": result.error,
+                    "interpreted_task": result.interpreted_task,
                     "model_calls": result.model_calls,
                     "tool_calls": result.tool_calls,
                     "total_tokens": result.total_tokens,

@@ -12,6 +12,7 @@ def build_messages(
     task: dict[str, Any],
     rounds: list[list[dict[str, Any]]],
     config: AnalystConfig,
+    question: str | None = None,
 ) -> list[dict[str, Any]]:
     system = (
         "You are an inventory table analyst. Use only the assigned table and the provided tools; "
@@ -22,9 +23,12 @@ def build_messages(
         "with group keys in alphabetical order. Empty matches total zero; empty grouped results are {}. "
         "If you cannot inspect all needed rows within the tool budget, do not guess."
     )
+    user_content = "Answer this structured task: " + json.dumps(task, sort_keys=True)
+    if question is not None:
+        user_content = "Original question: " + question + "\nValidated task: " + json.dumps(task, sort_keys=True)
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system},
-        {"role": "user", "content": "Answer this structured task: " + json.dumps(task, sort_keys=True)},
+        {"role": "user", "content": user_content},
     ]
     for round_messages in rounds[-config.limits.context_rounds :]:
         messages.extend(round_messages)

@@ -1,12 +1,16 @@
 import json
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import mongomock
+import pytest
 
 from harness.agent import AnalystAgent
 from harness.tools import AnalystTools, ToolError
-from self_heal.model import ModelReply, ToolCall
+from self_heal.cli import _parser
+from self_heal.model import ModelReply, OpenRouterModel, ToolCall
 from self_heal.settings import load_config
 from self_heal.table_store import AtlasTableStore
 
@@ -58,6 +62,87 @@ def test_scripted_agent_answers_with_only_three_registered_tools():
     assert model.seen[-1][0][-1]["role"] == "tool"
 
 
+def test_natural_question_is_interpreted_then_answered_with_shared_budget():
+    model = ScriptedModel(
+        [
+            ModelReply('{"metric":"available","filter_field":"warehouse","filter_value":"East"}', (), 50),
+            call("inspect_table", {}, 1),
+            call("read_rows", {"limit": 4, "filter_field": "warehouse", "filter_value": "East"}, 2),
+            call("calculate", {"operation": "sum", "values": [8, 5, 5]}, 3),
+            ModelReply('{"value":18}', (), 100),
+        ]
+    )
+    result = make_agent(model).run("How many available units are in the East warehouse?")
+    assert result.error is None
+    assert result.answer == {"value": 18}
+    assert result.interpreted_task == {"metric": "available", "filter_field": "warehouse", "filter_value": "East"}
+    assert result.model_calls == 5
+    assert result.total_tokens == 450
+    assert model.seen[0][1] == []
+    assert "Original question:" in model.seen[1][0][1]["content"]
+
+
+def test_natural_question_rejects_ambiguous_or_invalid_interpretation():
+    ambiguous = make_agent(ScriptedModel([ModelReply('{"error":"unclear metric"}', (), 40)])).run(
+        "How much inventory do we have?"
+    )
+    assert ambiguous.error == "Question is ambiguous or unsupported"
+    assert ambiguous.model_calls == 1
+    assert ambiguous.tool_calls == 0
+    unsupported = make_agent(ScriptedModel([ModelReply('{"metric":"revenue"}', (), 40)])).run(
+        "What is the revenue?"
+    )
+    assert unsupported.error == "Task metric is unsupported"
+    assert unsupported.tool_calls == 0
+    assert make_agent(ScriptedModel([])).run(" ").error == "Question must be 1 to 2000 characters"
+
+
+def test_question_interpretation_uses_the_same_model_call_limit():
+    config = load_config()
+    limited = replace(config, limits=replace(config.limits, max_model_calls=1))
+    result = make_agent(ScriptedModel([ModelReply('{"metric":"on_hand"}')]), limited).run(
+        "How many units are on hand?"
+    )
+    assert result.error == "Model-call budget exceeded before a final answer"
+    assert result.model_calls == 1
+
+
+def test_question_interpretation_uses_the_same_token_limit():
+    config = load_config()
+    limited = replace(config, limits=replace(config.limits, max_total_tokens=30))
+    result = make_agent(ScriptedModel([ModelReply('{"metric":"on_hand"}', (), 40)]), limited).run(
+        "How many units are on hand?"
+    )
+    assert result.error == "Token budget exceeded"
+    assert result.model_calls == 1
+    assert result.tool_calls == 0
+
+
+def test_cli_accepts_exactly_one_question_or_structured_task():
+    parser = _parser()
+    assert parser.parse_args(["run", "--dataset", "small", "--question", "How many units?"]).question
+    assert parser.parse_args(["run", "--dataset", "small", "--task", '{"metric":"on_hand"}']).task
+    with pytest.raises(SystemExit):
+        parser.parse_args(["run", "--dataset", "small"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["run", "--dataset", "small", "--question", "x", "--task", "{}"])
+
+
+def test_question_interpretation_request_omits_tool_options():
+    model = OpenRouterModel.__new__(OpenRouterModel)
+    completion = Mock(return_value=SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content='{"metric":"on_hand"}', tool_calls=None))],
+        usage=SimpleNamespace(total_tokens=12),
+    ))
+    model.model = "test-model"
+    model.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=completion)))
+    reply = model.complete([{"role": "user", "content": "How many units?"}], [])
+    assert reply.content == '{"metric":"on_hand"}'
+    assert reply.total_tokens == 12
+    assert "tools" not in completion.call_args.kwargs
+    assert "tool_choice" not in completion.call_args.kwargs
+
+
 def test_model_call_limit_and_invalid_final_answer_fail_clearly():
     config = load_config()
     limited = replace(config, limits=replace(config.limits, max_model_calls=2))
@@ -69,6 +154,7 @@ def test_model_call_limit_and_invalid_final_answer_fail_clearly():
     assert invalid.error == "Model final answer is not JSON"
     guessed = make_agent(ScriptedModel([ModelReply('{"value":18}')])).run({"metric": "available"})
     assert guessed.error == "Required table rows were not fully read"
+    assert guessed.answer is None
 
 
 def test_unregistered_tool_and_invalid_calculation_are_rejected():

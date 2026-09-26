@@ -39,14 +39,10 @@ class OpenRouterModel:
         )
 
     def complete(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> ModelReply:
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            tools=tools,
-            tool_choice="auto",
-            parallel_tool_calls=False,
-            temperature=0,
-        )
+        request: dict[str, Any] = {"model": self.model, "messages": messages, "temperature": 0}
+        if tools:
+            request.update(tools=tools, tool_choice="auto", parallel_tool_calls=False)
+        response = self.client.chat.completions.create(**request)
         if not response.choices:
             raise RuntimeError("Model returned no choices")
         message = response.choices[0].message
