@@ -23,6 +23,7 @@ from self_heal.settings import AnalystConfig
 from self_heal.storage import AtlasHistoryStore
 from self_heal.table_store import AtlasTableStore, DatasetInfo
 from self_heal.telemetry import LangSmithTelemetry
+from self_heal.evidence import EvidenceTools, run_evidence
 
 
 class RunnerError(RuntimeError):
@@ -95,6 +96,7 @@ class CandidateRunner:
             except Exception as exc:
                 status, history_error = "incomplete", type(exc).__name__
 
+        audited_tools = EvidenceTools(AnalystTools(table, self.config))
         result, trace = self.telemetry.execute(
             run_id=run_id, invocation=invocation,
             metadata=trace_metadata(
@@ -102,7 +104,7 @@ class CandidateRunner:
                 config=self.config, model=model, source_commit=source_commit,
                 runner_image_digest=image_digest,
             ),
-            model=model, tools=AnalystTools(table, self.config), started_at=started_at,
+            model=model, tools=audited_tools, started_at=started_at,
             execute=lambda traced_model, traced_tools: self._execute_container(
                 harness_dir, invocation, run_id, table, traced_model, traced_tools,
             ),
@@ -110,7 +112,8 @@ class CandidateRunner:
         if self.history and started:
             try:
                 self.history.finish_run(
-                    run_id, build_run_completion_patch(result=result, trace=trace, completed_at=utc_now())
+                    run_id, build_run_completion_patch(result=result, trace=trace, completed_at=utc_now(),
+                                                       evidence=run_evidence(table, audited_tools))
                 )
                 status = "recorded"
             except Exception as exc:

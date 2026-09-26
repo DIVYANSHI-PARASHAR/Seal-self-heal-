@@ -13,6 +13,7 @@ from self_heal.settings import LangSmithConfig, load_config
 from self_heal.storage import AtlasHistoryStore, HistoryError
 from self_heal.table_store import AtlasTableStore
 from self_heal.telemetry import LangSmithTelemetry, redact_trace_payload
+from self_heal.evidence import safe_payload
 
 
 FIXTURE = Path(__file__).resolve().parents[1] / "evals" / "analyst" / "data" / "small_inventory.json"
@@ -76,6 +77,37 @@ class FakeClient:
 
     def get_run_url(self, *, run, project_name):
         return f"https://smith.test/{project_name}/{run.id}"
+
+
+def test_display_evidence_redacts_sensitive_fields_and_trace_span_metadata():
+    assert safe_payload({"sku": "A-100", "api_key": "sk-secret123456", "email": "private@example.com"}) == {
+        "sku": "A-100", "api_key": "[REDACTED]", "email": "[REDACTED]"}
+    from datetime import datetime, timedelta, timezone
+    start = datetime.now(timezone.utc)
+    span = SimpleNamespace(id="root", parent_run_id=None, name="analyst.run", run_type="chain",
+                           start_time=start, end_time=start + timedelta(milliseconds=125),
+                           error=None, extra={"metadata": {"model_id": "test-model"}},
+                           total_tokens=42)
+    tool = SimpleNamespace(id="tool", parent_run_id="root", name="tool.read_rows", run_type="tool",
+                           start_time=start + timedelta(milliseconds=5),
+                           end_time=start + timedelta(milliseconds=25), error=None, extra={},
+                           total_tokens=None, inputs={"arguments": {"limit": 4, "api_key": "secret"}},
+                           outputs={"result": {"rows": [{"sku": "A-100"}]}})
+    class SpanClient:
+        def list_runs(self, **kwargs):
+            assert kwargs["trace_id"] == "root"
+            return [span, tool]
+    telemetry = LangSmithTelemetry(
+        LangSmithConfig(enabled=True, api_key="ls-test", project="test", workspace_id=None),
+        client_factory=lambda **kwargs: SpanClient(),
+        trace_factory=FakeTraceFactory(), wrap_openai_fn=lambda client, **kwargs: client)
+    spans = telemetry.trace_spans("root")
+    assert spans[0]["name"] == "analyst.run"
+    assert spans[0]["duration_ms"] == 125
+    assert spans[0]["model"] == "test-model"
+    assert spans[0]["tokens"] == 42
+    assert spans[1]["arguments"]["api_key"] == "[REDACTED]"
+    assert spans[1]["result_preview"]["rows"]["redacted_row_count"] == 1
 
 
 def make_executor(*, enabled=True, retrievable=True, history=None):

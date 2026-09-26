@@ -19,6 +19,7 @@ from self_heal.settings import AnalystConfig
 from self_heal.storage import AtlasHistoryStore
 from self_heal.table_store import DatasetInfo
 from self_heal.telemetry import LangSmithTelemetry, TraceEvidence
+from self_heal.evidence import EvidenceTools, run_evidence
 
 
 @dataclass(frozen=True)
@@ -86,6 +87,7 @@ class RunExecutor:
         def invoke(traced_model: ChatModel, traced_tools: AnalystTools) -> RunResult:
             return AnalystAgent(traced_model, traced_tools, self.config).run(invocation, run_id=run_id)
 
+        audited_tools = EvidenceTools(tools)
         result, trace = self.telemetry.execute(
             run_id=run_id,
             invocation=invocation,
@@ -97,7 +99,7 @@ class RunExecutor:
                 model=model,
             ),
             model=model,
-            tools=tools,
+            tools=audited_tools,
             execute=invoke,
             started_at=started_at,
         )
@@ -105,7 +107,8 @@ class RunExecutor:
             try:
                 self.history.finish_run(
                     run_id,
-                    build_run_completion_patch(result=result, trace=trace, completed_at=utc_now()),
+                    build_run_completion_patch(result=result, trace=trace, completed_at=utc_now(),
+                                               evidence=run_evidence(tools.table, audited_tools)),
                 )
                 history_status = "recorded"
             except Exception as exc:

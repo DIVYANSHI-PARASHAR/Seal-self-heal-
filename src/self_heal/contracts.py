@@ -271,7 +271,7 @@ def resource_summary(result: RunResult) -> dict[str, Any]:
 
 
 def build_run_completion_patch(
-    *, result: RunResult, trace: Any, completed_at: datetime
+    *, result: RunResult, trace: Any, completed_at: datetime, evidence: dict[str, Any] | None = None
 ) -> dict[str, Any]:
     """Return the immutable outcome portion of a compact Atlas run record."""
 
@@ -300,6 +300,7 @@ def build_run_completion_patch(
         "capability_request": dict(result.capability_request) if result.capability_request else None,
         "resources": resource_summary(result),
         "trace": trace_record,
+        "evidence": evidence,
         "lifecycle_entry": {"state": "completed", "at": completed_at},
     }
 

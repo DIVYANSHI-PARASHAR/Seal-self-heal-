@@ -255,6 +255,9 @@ class TracedTools:
 
     def record_remote_tool(self, name: str, arguments: dict[str, Any], result: dict[str, Any]) -> None:
         """Record an isolated candidate's tool envelope without executing it again."""
+        record = getattr(self._tools, "record_remote_tool", None)
+        if callable(record):
+            record(name, arguments, result)
         try:
             context = self._trace_factory(
                 f"tool.{name}", run_type="tool", client=self._client,
@@ -322,6 +325,38 @@ class LangSmithTelemetry:
             "inputs": getattr(run, "inputs", None), "outputs": getattr(run, "outputs", None),
             "error": getattr(run, "error", None),
         }) for run in runs]
+
+    def trace_spans(self, trace_id: str) -> list[dict[str, Any]]:
+        """Return display metadata only; trace inputs and outputs stay redacted and collapsed."""
+        if not self._config.enabled or not self._config.api_key:
+            return []
+        client_factory, _, _ = self._dependencies()
+        client = client_factory(api_key=self._config.api_key, workspace_id=self._config.workspace_id,
+                                timeout_ms=10000)
+        spans = []
+        for run in client.list_runs(project_name=self._config.project, trace_id=trace_id, limit=100):
+            start, end = getattr(run, "start_time", None), getattr(run, "end_time", None)
+            metadata = getattr(run, "extra", None) or {}
+            is_tool = str(getattr(run, "name", "")).startswith("tool.")
+            spans.append({
+                "id": str(getattr(run, "id", "")),
+                "parent_id": str(getattr(run, "parent_run_id", "")) if getattr(run, "parent_run_id", None) else None,
+                "name": getattr(run, "name", None),
+                "type": getattr(run, "run_type", None),
+                "start_time": start,
+                "duration_ms": round((end - start).total_seconds() * 1000, 1) if start and end else None,
+                "status": "error" if getattr(run, "error", None) else ("completed" if end else "running"),
+                "error": redact_trace_payload(getattr(run, "error", None)),
+                "model": redact_trace_payload((metadata.get("metadata") or {}).get("model_id") or
+                                              (metadata.get("metadata") or {}).get("model")),
+                "tokens": (getattr(run, "total_tokens", None) or
+                           (getattr(run, "prompt_tokens", None) or 0) +
+                           (getattr(run, "completion_tokens", None) or 0) or None),
+                **({"arguments": redact_trace_payload((getattr(run, "inputs", None) or {}).get("arguments")),
+                    "result_preview": redact_trace_payload((getattr(run, "outputs", None) or {}).get("result"))}
+                   if is_tool else {}),
+            })
+        return sorted(spans, key=lambda span: str(span["start_time"] or ""))
 
     def execute(
         self,

@@ -186,6 +186,15 @@ class TableSession:
         self.pages_read = 0
         self.bytes_read = 0
         self.rows_read = 0
+        self.evidence_pages: list[dict[str, Any]] = []
+
+    @property
+    def dataset_id(self) -> str:
+        return self._dataset_id
+
+    @property
+    def schema(self) -> dict[str, str]:
+        return dict(self._schema)
 
     def inspect_table(self) -> dict[str, Any]:
         return {
@@ -237,6 +246,12 @@ class TableSession:
         self.bytes_read += size
         self.rows_read += len(result_rows)
         next_cursor = self._encode_cursor(page[-1]["position"], fingerprint) if len(documents) > limit else None
+        from self_heal.evidence import safe_payload
+        self.evidence_pages.append({
+            "number": self.pages_read, "rows": safe_payload(result_rows),
+            "row_count": len(result_rows), "has_next": next_cursor is not None,
+            "filter": safe_payload({"field": filter_field, "value": filter_value}),
+        })
         if next_cursor is None:
             self._completed_queries.add(fingerprint)
         return {"rows": result_rows, "next_cursor": next_cursor}

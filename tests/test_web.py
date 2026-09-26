@@ -102,13 +102,14 @@ def request_json(base_url: str, path: str, *, method: str = "GET", body: dict[st
 def test_local_ui_serves_assets_and_only_dataset_metadata(local_server):
     with urlopen(local_server + "/", timeout=2) as response:  # noqa: S310 -- loopback test server
         page = response.read().decode("utf-8")
-    assert "What would you like to analyze?" in page
+    assert "Ask for available, on-hand, or reserved units" in page
     assert "v1 → v2" not in page
     assert 'id="dataset"' not in page
-    assert 'id="example-question"' in page
+    assert 'id="suggestions"' in page
+    assert 'role="combobox"' in page
     assert "Current workspace" not in page
     assert "Connected services" not in page
-    assert "<aside" not in page and "data-nav=" not in page
+    assert 'class="sidebar"' in page
     assert page.index('id="analysis-form"') < page.index('id="run-details"') < page.index('data-history-list')
     assert 'hidden' in page.split('id="run-details"', 1)[1].split('>', 1)[0]
 
@@ -136,13 +137,17 @@ def test_local_ui_runs_the_phase_three_executor_and_exposes_compact_evidence(loc
     assert run["resources"]["table_pages"] == 1
     assert run["history"]["status"] == "recorded"
     assert run["trace"]["status"] == "disabled"
-    assert "A-100" not in repr(run)
+    assert run["evidence"]["atlas"]["row_count"] == 3
+    assert run["evidence"]["atlas"]["pages"][0]["rows"][0]["sku"] == "A-100"
+    assert run["evidence"]["tool_calls"][0]["name"] == "read_rows"
+    assert run["evidence"]["tool_calls"][0]["arguments"]["filter_value"] == "East"
 
     _, history = request_json(local_server, "/api/runs?limit=20")
     assert [entry["run_id"] for entry in history["runs"]] == [run["run_id"]]
     _, stored = request_json(local_server, "/api/runs/" + run["run_id"])
     assert stored["answer"] == {"value": 18}
     assert stored["trace"]["status"] == "disabled"
+    assert stored["evidence"] == run["evidence"]
 
 
 def test_local_ui_automatically_selects_an_operator_dataset():
@@ -191,12 +196,55 @@ def test_local_ui_records_unsupported_questions_as_capability_gaps():
         )
         assert run["outcome"] == "unsupported"
         assert run["limitation_kind"] == "capability_gap"
+        assert run["evidence"]["atlas"]["row_count"] == 0
+        assert run["evidence"]["tool_calls"] == []
+        _, stored = request_json(base_url, "/api/runs/" + run["run_id"])
+        assert stored["gap"]["candidates"] == []
         _, gaps = request_json(base_url, "/api/capability-gaps")
         assert [entry["run_id"] for entry in gaps["runs"]] == [run["run_id"]]
     finally:
         server.shutdown()
         thread.join(timeout=2)
         server.server_close()
+
+
+def test_rejected_candidate_is_never_reported_as_promoted():
+    app = make_application(unsupported_model)
+    _, run = app.api("POST", "/api/runs", {"question": "What is total revenue?"})
+    run_id = run["run_id"]
+    app.history.gaps.insert_one({"_id": run_id, "run_id": run_id, "status": "open", "created_at": run["created_at"]})
+    app.history.eval_cases.insert_one({"_id": "case-1", "case_id": "case-1",
+        "scenario_id": "observed-" + run_id.replace("-", "")[:24] + "-original"})
+    app.history.candidates.insert_one({
+        "_id": "candidate-1", "candidate_id": "candidate-1", "incident_run_id": run_id,
+        "status": "rejected", "diff": "--- a/harness/agent.py\n+++ b/harness/agent.py",
+        "created_at": run["created_at"],
+        "selection": {"accepted": False, "reasons": ["original_failure_persists", "regression_failed"],
+            "trials": [{"version": "candidate", "role": "original", "passed": False},
+                       {"version": "candidate", "role": "regression", "passed": False}]},
+    })
+    _, detail = app.api("GET", "/api/runs/" + run_id)
+    candidate = detail["gap"]["candidates"][0]
+    assert candidate["status"] == "Rejected"
+    assert candidate["correctness"] == "failed"
+    assert candidate["regression"] == "failed"
+    assert detail["gap"]["active_version"] == app.config.task_contract_version
+    assert candidate["diff_url"]
+    assert detail["gap"]["cases"][0]["url"]
+    _, diff = app.api("GET", candidate["diff_url"])
+    assert diff["candidate_id"] == "candidate-1"
+
+
+def test_no_tool_run_reports_explicit_zero_evidence():
+    app = make_application(unsupported_model)
+    _, run = app.api("POST", "/api/runs", {"question": "What is total revenue?"})
+    _, detail = app.api("GET", "/api/runs/" + run["run_id"])
+    assert detail["outcome"] == "unsupported"
+    assert detail["resources"]["tool_calls"] == 0
+    assert detail["resources"]["table_pages"] == 0
+    assert detail["evidence"]["tool_calls"] == []
+    assert detail["evidence"]["atlas"]["pages"] == []
+    assert detail["evidence"]["atlas"]["row_count"] == 0
 
 
 def test_new_ui_task_uses_the_active_pinned_version(monkeypatch):

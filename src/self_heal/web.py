@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
+import re
 import sysconfig
 from collections.abc import Callable
 from datetime import date, datetime
@@ -30,6 +31,7 @@ from self_heal.table_store import AtlasTableStore, DatasetError, DatasetInfo
 from self_heal.telemetry import LangSmithTelemetry
 from self_heal.repository import CandidateRepository
 from self_heal.runner import CandidateRunner
+from self_heal.evidence import safe_payload
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -90,14 +92,34 @@ def _run_payload(execution: RunExecution) -> dict[str, Any]:
     }
 
 
-def _history_summary(record: dict[str, Any]) -> dict[str, Any]:
+def _history_summary(record: dict[str, Any], *, detail: bool = False) -> dict[str, Any]:
     invocation = record.get("invocation") or {}
     trace = record.get("trace") or {}
+    answer = record.get("answer") or {}
+    if record.get("outcome") == "answered":
+        task = record.get("interpreted_task") or {}
+        if "value" in answer and task.get("metric") in {"available", "on_hand", "reserved"}:
+            metric = {"available": "available", "on_hand": "on-hand", "reserved": "reserved"}[task["metric"]]
+            location = (f" in the {task['filter_value']} warehouse" if task.get("filter_field") == "warehouse"
+                        else f" in the {task['filter_value']} category" if task.get("filter_field") == "category"
+                        else f" for SKU {task['filter_value']}" if task.get("filter_field") == "sku" else "")
+            message = f"{answer['value']} {metric} units{location or ' in this dataset'}."
+        elif "value" in answer:
+            message = f"Answer: {answer['value']}"
+        elif "groups" in answer:
+            message = "; ".join(f"{key}: {value}" for key, value in answer["groups"].items()) or "No matching groups."
+        else:
+            message = "No answer was stored."
+    elif record.get("outcome") == "unsupported":
+        message = record.get("limitation_reason") or "The analyst cannot answer with its current capabilities."
+    else:
+        message = record.get("error") or "No answer was stored."
     return {
         "run_id": record.get("run_id"),
         "created_at": record.get("created_at"),
         "outcome": record.get("outcome"),
         "answer": record.get("answer"),
+        "message": message,
         "error": record.get("error"),
         "question": invocation.get("question"),
         "task": record.get("interpreted_task"),
@@ -114,6 +136,9 @@ def _history_summary(record: dict[str, Any]) -> dict[str, Any]:
             "error_type": trace.get("error_type"),
         },
         "history_status": record.get("status"),
+        "version": (record.get("execution") or {}).get("source", {}).get("commit") or
+                   (record.get("execution") or {}).get("config", {}).get("task_contract_version"),
+        **({"evidence": record.get("evidence")} if detail else {}),
     }
 
 
@@ -143,10 +168,12 @@ class WebApplication:
         route = urlsplit(path)
         query = parse_qs(route.query)
         if method == "GET" and route.path == "/api/health":
+            active = self.history.active_version(self.config.task_family)
             return HTTPStatus.OK, {
                 "atlas": "connected",
                 "langsmith": "enabled" if self.tracing.enabled else "disabled",
                 "task_contract_version": self.config.task_contract_version,
+                "active_version": active.get("commit") if active else self.config.task_contract_version,
             }
         if method == "GET" and route.path == "/api/datasets":
             return HTTPStatus.OK, {
@@ -168,7 +195,30 @@ class WebApplication:
             record = self.history.get_run(run_id)
             if record is None:
                 return HTTPStatus.NOT_FOUND, {"error": "Run history is unavailable"}
-            return HTTPStatus.OK, _history_summary(record)
+            payload = _history_summary(record, detail=True)
+            if record.get("outcome") == "unsupported":
+                payload["gap"] = self._gap_evidence(run_id)
+            trace = record.get("trace") or {}
+            if trace.get("status") == "available" and trace.get("root_id"):
+                try:
+                    payload["spans"] = self.telemetry.trace_spans(trace["root_id"])
+                except Exception:
+                    payload["spans"] = None
+            return HTTPStatus.OK, payload
+        if method == "GET" and route.path.startswith("/api/evaluation-cases/"):
+            case_id = route.path.removeprefix("/api/evaluation-cases/")
+            record = self.history.get_eval_case(case_id) if case_id and "/" not in case_id else None
+            if not record:
+                return HTTPStatus.NOT_FOUND, {"error": "Evaluation case is unavailable"}
+            return HTTPStatus.OK, {"case_id": case_id, "scenario_id": record.get("scenario_id"),
+                                   "origin": record.get("origin"), "task": safe_payload(record.get("task")),
+                                   "dataset": record.get("dataset")}
+        if method == "GET" and route.path.startswith("/api/candidates/") and route.path.endswith("/diff"):
+            candidate_id = route.path.removeprefix("/api/candidates/").removesuffix("/diff").rstrip("/")
+            record = self.history.candidates.find_one({"_id": candidate_id}) if candidate_id and "/" not in candidate_id else None
+            if not record or not record.get("diff"):
+                return HTTPStatus.NOT_FOUND, {"error": "Candidate diff is unavailable"}
+            return HTTPStatus.OK, {"candidate_id": candidate_id, "diff": safe_payload(record["diff"])}
         if method == "POST" and route.path == "/api/runs":
             request = _run_request(body)
             execution, dataset = self._run(request)
@@ -178,8 +228,37 @@ class WebApplication:
                 "id": dataset.dataset_id,
                 "row_count": dataset.row_count,
             }
+            record = self.history.get_run(payload["run_id"])
+            if record:
+                payload = _history_summary(record, detail=True) | {"history": payload["history"], "message": payload["message"],
+                                                        "dataset": payload["dataset"],
+                                                        "gap": self._gap_evidence(payload["run_id"]) if payload["outcome"] == "unsupported" else None}
             return HTTPStatus.CREATED, payload
         return HTTPStatus.NOT_FOUND, {"error": "Endpoint not found"}
+
+    def _gap_evidence(self, run_id: str) -> dict[str, Any]:
+        gap = self.history.get_gap(run_id)
+        candidates = list(self.history.candidates.find({"incident_run_id": run_id}).sort("created_at", -1).limit(10))
+        active = self.history.active_version(self.config.task_family)
+        cases = list(self.history.eval_cases.find({"scenario_id": {"$regex": "^observed-" + re.escape(run_id.replace("-", "")[:24])}}))
+        result = []
+        for candidate in candidates:
+            selection = candidate.get("selection") or {}
+            trials = selection.get("trials") or []
+            def status(roles: set[str]) -> str:
+                matching = [trial for trial in trials if trial.get("version") == "candidate" and trial.get("role") in roles]
+                return "not tested" if not matching else ("passed" if all(trial.get("passed") for trial in matching) else "failed")
+            result.append({
+                "id": candidate["candidate_id"], "status": "Rejected" if candidate.get("status") == "rejected" or selection.get("accepted") is False else candidate.get("status", "proposed"),
+                "correctness": status({"original", "generated_reproduction"}),
+                "regression": status({"regression", "private_validation", "negative"}),
+                "reasons": selection.get("reasons") or ([candidate["rejection_reason"]] if candidate.get("rejection_reason") else []),
+                "diff_url": "/api/candidates/" + candidate["candidate_id"] + "/diff" if candidate.get("diff") else None,
+            })
+        return {"status": gap.get("status") if gap else "not evaluated",
+                "active_version": active.get("commit") if active else self.config.task_contract_version,
+                "cases": [{"id": case["case_id"], "url": "/api/evaluation-cases/" + case["case_id"]} for case in cases],
+                "candidates": result}
 
     def _run(self, request: dict[str, str]) -> tuple[RunExecution, DatasetInfo]:
         dataset_id = request.get("dataset_id")

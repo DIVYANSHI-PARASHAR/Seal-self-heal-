@@ -1,124 +1,43 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta
-      name="description"
-      content="A local operator interface for the Self-Heal inventory analyst."
-    />
-    <title>Self-Heal · Inventory analyst</title>
-    <link rel="stylesheet" href="./styles.css" />
-  </head>
-  <body>
-    <div class="app-shell">
-      <header class="site-header">
-        <div class="site-header-inner">
-          <div class="brand" aria-label="Self-Heal">
-            <svg class="brand-mark" viewBox="0 0 28 28" aria-hidden="true">
-              <path d="M4 4h9v9H4zM15 15h9v9h-9zM15 4h5a4 4 0 0 1 4 4v5h-9zM4 15h9v9H8a4 4 0 0 1-4-4z" />
-            </svg>
-            <span>Self-Heal</span>
-          </div>
-          <span class="header-caption">Inventory analyst</span>
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Self-Heal inventory analyst and run evidence">
+  <title>Self-Heal · Inventory analyst</title><link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar" aria-label="Workspace navigation">
+    <a class="brand" href="/" aria-label="Self-Heal home"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>Self-Heal</a>
+    <nav aria-label="Main"><a href="#ask" class="nav-link">Ask</a><a href="#runs" class="nav-link">Runs</a></nav>
+    <div class="active-version" id="versions"><span class="status-dot"></span><span>Active · <strong data-active-version>Loading</strong></span></div>
+  </aside>
+  <div class="workspace">
+    <header class="topbar"><span class="workspace-title">Inventory analyst</span><span class="connection"><span class="status-dot"></span><span data-atlas-status>Checking Atlas</span></span></header>
+    <main>
+      <section class="ask" id="ask" aria-label="Ask the analyst">
+        <form id="analysis-form" autocomplete="off">
+          <label class="sr-only" for="question">Question for the inventory analyst</label>
+          <div class="question-bar"><span class="search-icon" aria-hidden="true">⌕</span><input id="question" name="question" type="text" required maxlength="2000" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="suggestions" placeholder="Ask for available, on-hand, or reserved units by SKU, warehouse, or category"><button type="submit" data-run-button disabled>Run analysis <span aria-hidden="true">→</span></button></div>
+          <div class="suggestions" id="suggestions" role="listbox" aria-label="Suggested questions" hidden></div>
+        </form>
+      </section>
+      <section class="run-view" id="run-details" aria-labelledby="run-heading" hidden>
+        <div class="eyebrow">Run evidence</div><div class="run-title-line"><h1 id="run-heading" data-run-question></h1><span class="outcome-badge" data-outcome></span></div>
+        <p class="answer" data-run-message></p>
+        <div class="run-facts"><span>Run ID <strong data-run-id></strong><button type="button" class="text-button" data-copy-run-id>Copy</button></span><span>Version <strong data-version></strong></span><span>Duration <strong data-duration></strong></span><span data-resource-summary></span></div>
+        <div class="evidence-grid">
+          <section class="evidence-section" aria-labelledby="atlas-heading"><div class="section-heading"><h2 id="atlas-heading">Atlas data read</h2><span data-atlas-summary></span></div><div data-atlas-content></div></section>
+          <section class="evidence-section" aria-labelledby="tools-heading"><div class="section-heading"><h2 id="tools-heading">Tool calls</h2><span data-tools-summary></span></div><div data-tool-content></div></section>
+          <section class="evidence-section" aria-labelledby="trace-heading"><div class="section-heading"><h2 id="trace-heading">LangSmith trace</h2><a data-trace-link hidden target="_blank" rel="noopener noreferrer">Open full trace ↗</a></div><div data-trace-content></div></section>
+          <section class="evidence-section" id="evaluations" aria-labelledby="evaluation-heading" hidden><div class="section-heading"><h2 id="evaluation-heading">Capability gap & candidate check</h2></div><div data-gap-content></div></section>
         </div>
-      </header>
-
-      <main class="page-content">
-          <section class="ask-view" aria-labelledby="analyze-heading">
-            <div class="ask-intro">
-              <h1 id="analyze-heading">What would you like to analyze?</h1>
-            </div>
-
-            <form class="analysis-form" id="analysis-form">
-              <div class="form-row example-question-row">
-                <label for="example-question">Try an example</label>
-                <select id="example-question" name="example-question">
-                  <option value="">Custom question</option>
-                </select>
-              </div>
-
-              <label class="field-label" for="question">Your question</label>
-              <textarea id="question" name="question" rows="4" required maxlength="2000" placeholder="For example: How many available units are in the East warehouse?"></textarea>
-
-              <div class="form-footer">
-                <button class="primary-button" type="submit" disabled data-run-button>
-                  <span>Run agent</span>
-                  <span aria-hidden="true">→</span>
-                </button>
-              </div>
-            </form>
-          </section>
-
-          <section class="run-view" id="run-details" aria-labelledby="run-heading" aria-live="polite" hidden>
-            <div class="run-heading">
-              <h2 id="run-heading">Result</h2>
-              <div class="run-meta">
-                <span data-run-id>Preparing run…</span>
-                <button class="copy-button" type="button" data-copy-run-id disabled>Copy ID</button>
-              </div>
-            </div>
-
-            <div class="task-summary">
-              <p data-run-question></p>
-              <span class="summary-dataset" data-run-dataset></span>
-            </div>
-
-            <section class="result-panel" aria-label="Answer">
-              <p class="stage-title" data-outcome-heading>Preparing run evidence.</p>
-              <div class="evidence-line">
-                <div>
-                  <span class="evidence-label">Outcome</span>
-                  <strong data-outcome>—</strong>
-                </div>
-                <div>
-                  <span class="evidence-label">Answer</span>
-                  <p class="answer-message" data-run-message>—</p>
-                </div>
-              </div>
-              <details class="disclosure" data-answer-details hidden>
-                <summary>Show structured result</summary>
-                <pre data-answer-json></pre>
-              </details>
-            </section>
-
-            <section class="result-panel" aria-labelledby="evidence-heading">
-              <h3 class="detail-heading" id="evidence-heading">Run details</h3>
-              <div class="evaluation-list" aria-label="Run evidence details">
-                <div class="evaluation-row"><div><strong>Atlas history</strong><span data-history-status>—</span></div><span class="row-result" data-history-badge>—</span></div>
-                <div class="evaluation-row"><div><strong>LangSmith trace</strong><span data-trace-detail>—</span></div><a class="run-link" data-trace-link hidden target="_blank" rel="noreferrer">Open trace</a></div>
-                <div class="evaluation-row"><div><strong>Resource use</strong><span data-resource-summary>—</span></div><span class="row-result" data-resource-badge>Measured</span></div>
-              </div>
-              <p class="result-note">Detailed model and tool activity remains in LangSmith. This interface shows the compact evidence record without table rows or raw trace payloads.</p>
-            </section>
-
-            <section class="result-panel" id="gap-panel" aria-label="Capability gap" hidden>
-              <p class="stage-title">This request is a recorded capability gap.</p>
-              <div class="change-callout">
-                <div><span class="evidence-label">Classification</span><strong data-gap-kind>capability_gap</strong></div>
-                <div><span class="evidence-label">Reason</span><p data-gap-reason>—</p></div>
-              </div>
-              <p class="result-note">This observation is recorded for the protected evolution workflow.</p>
-            </section>
-          </section>
-
-          <section class="history-view" aria-labelledby="history-heading">
-            <div class="ask-intro">
-              <h2 id="history-heading">Run history</h2>
-              <p class="lede">Select a past run to show its result and details above.</p>
-            </div>
-            <div class="history-section">
-              <h2>Recent runs</h2>
-              <div class="evaluation-list" data-history-list aria-live="polite"></div>
-            </div>
-            <div class="history-section">
-              <h2>Capability gaps</h2>
-              <div class="evaluation-list" data-gap-list aria-live="polite"></div>
-            </div>
-          </section>
-      </main>
-    </div>
-
-    <script src="./app.js"></script>
-  </body>
+      </section>
+      <section class="recent" id="runs" aria-labelledby="recent-heading"><div class="section-heading"><h2 id="recent-heading">Recent runs</h2><span>Newest first</span></div><div class="run-list-head"><span>Question</span><span>Outcome</span><span>Version</span><span>Time</span></div><div data-history-list aria-live="polite"></div></section>
+    </main>
+  </div>
+</div>
+<div class="sr-only" role="status" aria-live="polite" data-announcement></div>
+<script src="./app.js"></script>
+</body>
 </html>
