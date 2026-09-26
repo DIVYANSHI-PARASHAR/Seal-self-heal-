@@ -77,6 +77,7 @@ def _run_payload(execution: RunExecution) -> dict[str, Any]:
         "interpreted_task": result.interpreted_task,
         "limitation_kind": result.limitation_kind,
         "limitation_reason": result.limitation_reason,
+        "capability_request": result.capability_request,
         "resources": {
             "model_calls": result.model_calls,
             "tool_calls": result.tool_calls,
@@ -104,6 +105,7 @@ def _history_summary(record: dict[str, Any]) -> dict[str, Any]:
         "resources": record.get("resources"),
         "limitation_kind": record.get("limitation_kind"),
         "limitation_reason": record.get("limitation_reason"),
+        "capability_request": record.get("capability_request"),
         "trace": {
             "id": trace.get("root_id"),
             "url": trace.get("url"),

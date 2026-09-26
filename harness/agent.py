@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -40,6 +41,34 @@ class RunResult:
     table_bytes: int
     limitation_kind: str | None = None
     limitation_reason: str | None = None
+    capability_request: dict[str, Any] | None = None
+
+
+def logistics_capability_request(question: str) -> dict[str, Any] | None:
+    """Recognize the one reviewed logistics contract without reading any data.
+
+    This intentionally sits before model interpretation.  The baseline must
+    make an honest, deterministic refusal for the incident rather than turn a
+    bounded capability gap into a model-dependent generic error.
+    """
+    match = re.fullmatch(
+        r"\s*how many customers sent more than\s+(\d+)\s+shipments from warehouse\s+(\d+)\s+yesterday\?\s*",
+        question,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    return {
+        "kind": "shipment_customer_threshold",
+        "domain": "logistics",
+        "task_family": "logistics-shipment-threshold",
+        "contract_version": "logistics-shipment-threshold-v1",
+        "operation": "count_customers_with_shipment_count_gt",
+        "warehouse_number": int(match.group(2)),
+        "relative_day": "yesterday",
+        "threshold": int(match.group(1)),
+        "required_relations": ["shipments", "warehouses", "customers"],
+    }
 
 
 def validate_task(task: dict[str, Any], config: AnalystConfig) -> None:
@@ -140,6 +169,7 @@ class AnalystAgent:
         unsupported = False
         limitation_kind: str | None = None
         limitation_reason: str | None = None
+        capability_request: dict[str, Any] | None = None
         interpreted_task: dict[str, Any] | None = None
         rounds: list[list[dict[str, Any]]] = []
         try:
@@ -148,6 +178,9 @@ class AnalystAgent:
                 question = task.strip()
                 if not question or len(question) > 2000:
                     raise AgentFailure("Question must be 1 to 2000 characters")
+                capability_request = logistics_capability_request(question)
+                if capability_request is not None:
+                    raise UnsupportedQuestion("Shipment customer-threshold aggregation is not registered")
                 reply = self.model.complete(question_messages(question, self.config), [])
                 model_calls += 1
                 total_tokens += reply.total_tokens
@@ -225,4 +258,5 @@ class AnalystAgent:
             table_bytes=self.tools.table.bytes_read,
             limitation_kind=limitation_kind,
             limitation_reason=limitation_reason,
+            capability_request=capability_request,
         )

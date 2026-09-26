@@ -52,6 +52,7 @@ class AnalystConfig:
     table_schema: dict[str, str]
     limits: Limits
     evaluation: EvaluationConfig
+    task_contracts: dict[str, dict[str, Any]] | None = None
 
 
 @dataclass(frozen=True)
@@ -106,6 +107,12 @@ def load_config(path: Path = DEFAULT_CONFIG) -> AnalystConfig:
         or type(evaluation.require_trace) is not bool
     ):
         raise ValueError("Invalid evaluation configuration")
+    task_contracts = raw.get("task_contracts", {version: contract})
+    if not isinstance(task_contracts, dict) or version not in task_contracts:
+        raise ValueError("Task contract registry is invalid")
+    for contract_version, registered in task_contracts.items():
+        if not isinstance(contract_version, str) or not isinstance(registered, dict) or not registered.get("family"):
+            raise ValueError("Task contract registry is invalid")
     return AnalystConfig(
         task_contract_version=version,
         task_family=family,
@@ -119,6 +126,7 @@ def load_config(path: Path = DEFAULT_CONFIG) -> AnalystConfig:
         table_schema=schema,
         limits=limits,
         evaluation=evaluation,
+        task_contracts={str(key): dict(value) for key, value in task_contracts.items()},
     )
 
 

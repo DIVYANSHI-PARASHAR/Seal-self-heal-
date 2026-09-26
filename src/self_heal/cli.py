@@ -137,6 +137,7 @@ def _present_run(
                 "table_bytes": result.table_bytes,
                 "limitation_kind": result.limitation_kind,
                 "limitation_reason": result.limitation_reason,
+                "capability_request": result.capability_request,
                 **evidence,
             }
         )

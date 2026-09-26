@@ -103,11 +103,21 @@ def invocation_record(invocation: dict[str, Any] | str, config: AnalystConfig) -
 
 
 def dataset_record(dataset: DatasetInfo) -> dict[str, Any]:
-    return {
+    record = {
         "id": dataset.dataset_id,
         "content_hash": dataset.content_hash,
         "row_count": dataset.row_count,
     }
+    # Logistics bundles use a richer immutable manifest while inventory tables
+    # retain their compact backwards-compatible evidence shape.
+    if hasattr(dataset, "input_kind"):
+        record.update({
+            "input_kind": dataset.input_kind,
+            "domain": getattr(dataset, "domain", None),
+            "schema_version": getattr(dataset, "schema_version", None),
+            "relations": getattr(dataset, "relations", None),
+        })
+    return record
 
 
 def model_identity(model: ChatModel) -> dict[str, Any]:
@@ -287,6 +297,7 @@ def build_run_completion_patch(
         "interpreted_task": dict(result.interpreted_task) if result.interpreted_task is not None else None,
         "limitation_kind": result.limitation_kind,
         "limitation_reason": result.limitation_reason,
+        "capability_request": dict(result.capability_request) if result.capability_request else None,
         "resources": resource_summary(result),
         "trace": trace_record,
         "lifecycle_entry": {"state": "completed", "at": completed_at},

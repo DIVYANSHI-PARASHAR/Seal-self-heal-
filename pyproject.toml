@@ -22,7 +22,7 @@ dev = ["mongomock>=4.1", "pytest>=8"]
 self-heal = "self_heal.cli:main"
 
 [tool.setuptools]
-packages = ["self_heal", "harness", "evals", "evals.analyst", "evals.analyst.data"]
+packages = ["self_heal", "harness", "evals", "evals.analyst", "evals.analyst.data", "evals.logistics"]
 
 [tool.setuptools.package-dir]
 self_heal = "src/self_heal"

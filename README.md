@@ -63,6 +63,22 @@ The gap list includes the original question, dataset ID and content hash, source
 
 The base harness registers `inspect_table`, `read_rows`, and `calculate`. A trusted table adapter binds each run to one Atlas dataset and enforces page and byte limits. Its dataset definitions live in `evals/analyst/data/`; runtime rows are read from Atlas. Generated code receives no connection string or protected oracle files.
 
+## Logistics capability foundation
+
+The protected logistics expansion is additive: `logistics_datasets`,
+`logistics_customers`, `logistics_warehouses`, and `logistics_shipments` hold
+immutable related-data bundles alongside the existing inventory collections.
+`evals/logistics/generator.py` defines the synthetic 74-shipment public
+incident fixture; its independent oracle returns `{"value": 2}` for “How
+many customers sent more than 15 shipments from warehouse 3 yesterday?”
+
+The current baseline deliberately refuses that reviewed request before any
+model or data read, with a `capability_gap` and a structured
+`shipment_customer_threshold` request. This preserves the intended evolution
+signal. The protected logistics session itself exposes only catalog/relation
+inspection and filter-bound, cursor-bound shipment pages; it does not expose
+database credentials, collection names, or arbitrary queries.
+
 ## Run the protected baseline evaluation
 
 Phase 2 declares one small success, one zero-match edge case, and one 512-row grouped stress case in `evals/analyst/scenarios.yaml`. Materialize their valid datasets, then run either baseline check:

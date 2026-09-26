@@ -12,6 +12,18 @@ task_contract:
   missing_values: reject_dataset
   numeric_values: nonnegative_integers
 
+# Protected registry: inventory is executable today; logistics is an approved
+# future capability contract, not an implicit database-access permission.
+task_contracts:
+  inventory-totals-v1:
+    family: inventory-totals
+    input_kind: inventory_table
+  logistics-shipment-threshold-v1:
+    family: logistics-shipment-threshold
+    input_kind: logistics_bundle
+    operation: count_customers_with_shipment_count_gt
+    required_relations: [shipments, warehouses, customers]
+
 table_schema:
   sku: string
   warehouse: string
