@@ -9,6 +9,7 @@
 3. Implement `evals/analyst/oracle.py` as the protected calculation of expected answers. Check it against hand-worked examples in `tests/test_scenarios.py`. The candidate harness may use the same input data, but it cannot import or see the oracle or reference outputs.
 4. Implement the initial case runner in `src/self_heal/evaluation.py`. It launches a fixed harness version with a controlled task and an Atlas dataset ID bound to a run-scoped table-access interface, collects the structured answer, compares it with the oracle, and measures externally enforced step/tool/time and data-read budgets. Record individual trials instead of only a pass flag.
 5. Establish three disclosed baseline cases: the Phase 1 small success, an edge case, and a generated 512-row dataset for the `bulk-warehouse-available` task definition. Verify that the initial harness fails the larger supported task for a known correctness or budget reason. Freeze the failing case before asking a model for a patch.
+6. Define evaluation semantics for `outcome=unsupported`: it is a normal conversational response for a user, but it fails an eval when the frozen requirement expects an answer. Include a scripted unsupported-question case and preserve the original natural-language request alongside the validated task or proposed new capability. Do not count a no-match total of zero, malformed model output, or infrastructure failure as a capability gap.
 
 ## Configuration
 
@@ -20,5 +21,6 @@ Use the fixed agent model from Phase 1 for live comparisons. Fixture seeds, eval
 - A run can read only its assigned Atlas dataset; the oracle and other datasets are unavailable through its table interface.
 - The initial harness passes the small case and reliably fails the bulk case under the declared limits. The evaluator reports the violated requirement, not just whether an exception occurred.
 - A deliberately wrong answer, budget increase, or missing output is rejected by the evaluator. Old successful cases remain part of the regression bank.
+- The evaluator distinguishes an explicit unsupported response from an error and can grade it against a declared answerable requirement without treating the polite response as task success.
 
 **Phase deliverables:** `evals/analyst/{generator,oracle,scenarios.yaml}`, `src/self_heal/evaluation.py`, `tests/{test_scenarios,test_evaluation}.py`, and the evaluation fields of `config/analyst.yaml`.

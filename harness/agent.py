@@ -19,11 +19,16 @@ class AgentFailure(ValueError):
     pass
 
 
+class UnsupportedQuestion(AgentFailure):
+    pass
+
+
 @dataclass(frozen=True)
 class RunResult:
     run_id: str
     answer: dict[str, Any] | None
     error: str | None
+    outcome: str
     interpreted_task: dict[str, Any] | None
     model_calls: int
     tool_calls: int
@@ -81,9 +86,16 @@ def parse_question_task(content: str | None, config: AnalystConfig) -> dict[str,
         task = json.loads(content)
     except json.JSONDecodeError as exc:
         raise AgentFailure("Could not interpret the question as a supported task") from exc
-    if isinstance(task, dict) and set(task) == {"error"}:
-        raise AgentFailure("Question is ambiguous or unsupported")
-    validate_task(task, config)
+    if not isinstance(task, dict):
+        raise AgentFailure("Question interpretation has an invalid format")
+    if set(task) == {"error"}:
+        raise UnsupportedQuestion("Question is ambiguous or unsupported")
+    if set(task) - {"metric", "filter_field", "filter_value", "group_by"}:
+        raise AgentFailure("Question interpretation has an invalid format")
+    try:
+        validate_task(task, config)
+    except AgentFailure as exc:
+        raise UnsupportedQuestion("Question is ambiguous or unsupported") from exc
     return task
 
 
@@ -121,6 +133,7 @@ class AnalystAgent:
         model_calls = tool_calls = total_tokens = 0
         answer: dict[str, Any] | None = None
         error: str | None = None
+        unsupported = False
         interpreted_task: dict[str, Any] | None = None
         rounds: list[list[dict[str, Any]]] = []
         try:
@@ -183,6 +196,8 @@ class AnalystAgent:
                 rounds.append(exchange)
             else:
                 raise AgentFailure("Model-call budget exceeded before a final answer")
+        except UnsupportedQuestion:
+            unsupported = True
         except AgentFailure as exc:
             error = str(exc)
         except Exception as exc:  # Provider errors should not leak request headers or secrets.
@@ -192,6 +207,7 @@ class AnalystAgent:
             run_id=run_id,
             answer=answer,
             error=error,
+            outcome="error" if error else "unsupported" if unsupported else "answered",
             interpreted_task=interpreted_task,
             model_calls=model_calls,
             tool_calls=tool_calls,

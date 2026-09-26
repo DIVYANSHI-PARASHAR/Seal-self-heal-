@@ -2,7 +2,7 @@
 
 Self-Heal is one local application containing a custom analyst harness and a trusted supervisor. The harness evolves in response to task evidence; the supervisor runs separately so it can evaluate and start a new version without modifying an in-flight process.
 
-**Implementation status:** Phase 1 provides the Atlas table store, scoped table interface, OpenRouter model client, three-tool harness, and local runner. The protected evaluator, LangSmith adapter, evolution supervisor, and Docker boundary remain planned for later phases.
+**Implementation status:** Phase 1 provides the Atlas table store, scoped table interface, OpenRouter model client, three-tool harness, local runner, and explicit `unsupported` outcome for conversational capability refusals. Persisted LangSmith traces, Atlas run history, the protected evaluator, evolution supervisor, and Docker boundary remain planned for later phases.
 
 ## Components
 
@@ -58,7 +58,7 @@ Source allowlisting, independent grading, and execution isolation address differ
 
 ```mermaid
 flowchart TD
-    Observe[Observe wrong result, budget exhaustion, missing capability, or exception] --> Baseline[Replay observed task under fixed limits]
+    Observe[Observe wrong result, budget exhaustion, explicit unsupported response, or exception] --> Baseline[Replay observed task under fixed limits]
     Baseline --> OriginalFailure{Failure reproduced with trace?}
     OriginalFailure -->|no| Evidence[Gather evidence or improve diagnostics]
     OriginalFailure -->|yes| ProposeCase[Propose structured scenario]
@@ -85,19 +85,21 @@ Selection checks the original requirement, previous successful behavior, and fre
 
 ## LangSmith traces and Atlas improvement memory
 
-LangSmith is the detailed execution log. A thin trusted adapter instruments the OpenRouter-compatible model client and tool boundary, attaches a shared run ID and source/config/model metadata, and records requests, responses, errors, timing, and reported token usage. The supervisor reads the LangSmith trace for diagnosis. Secrets and protected answers must be excluded or redacted before trace upload; a missing trace is marked as incomplete evidence, never treated as success. The independent evaluator remains authoritative for correctness and budgets.
+LangSmith is the detailed execution log. A thin trusted adapter instruments the OpenRouter-compatible model client and tool boundary, attaches a shared run ID and source/config/model metadata, and records requests, responses, errors, timing, and reported token usage. It will tag an explicit refusal with `outcome=unsupported` and `limitation_kind=capability_gap` on the root trace, including safe question/reason metadata even when no table tool was called. The supervisor reads that trace for diagnosis and can search for capability gaps directly. Secrets and protected answers must be excluded or redacted before trace upload; a missing trace is marked as incomplete evidence, never treated as success. The independent evaluator remains authoritative for correctness and budgets.
 
 Atlas holds immutable analyst data in `analyst_datasets` and `analyst_rows`, separate from the durable, queryable improvement history below. History records reference dataset IDs and content hashes; they do not duplicate table rows or full model/tool trace payloads.
 
 | Atlas records | Evidence to retain | How the next iteration uses it |
 | --- | --- | --- |
-| Runs | Task and assigned Atlas dataset ID/hash, source/config/model identities, LangSmith root trace ID, outcome, independent resource measurements, trace availability | Find the detailed trace and distinguish a harness limitation from an external failure |
+| Runs | Original question and interpreted task, assigned Atlas dataset ID/hash, source/config/model identities, LangSmith root trace ID, outcome, capability-gap classification/reason, independent resource measurements, trace availability | Find unsupported requests and their detailed traces; distinguish a missing capability from an external failure |
 | Eval cases | Structured scenario, Atlas dataset ID/hash, protected oracle version, expected-result reference, origin, split, exposure history | Reuse original failures as regressions while preserving validation/final boundaries |
 | Candidates | Parent and candidate commits, hypothesis, edited mechanism, source diff, relevant prior attempts | Avoid blindly repeating rejected hypotheses and build on mechanisms with evidence |
 | Evaluations and decisions | All baseline/candidate trials, case identities, correctness, resource use, trace IDs, reasons for acceptance/rejection | Attribute improvement and retain failures as well as successes |
 | Versions | Active commit, previous commit, associated evidence, activation/rollback history | Pin fresh runs and keep rollback reviewable |
 
 Candidate identities, frozen case definitions, and published Atlas datasets must not be silently rewritten. Split/exposure changes are separate history events. Access control must keep private dataset IDs, eval records, and expected answers away from the proposer and candidate; a candidate's table interface can read only its assigned dataset. The supervisor queries Atlas for relevant attempts by task family/mechanism, then fetches only the associated LangSmith traces needed for a proposal. Semantic search, a second trace store, and a custom trace UI are unnecessary for the first build.
+
+A capability gap is an observation, not proof that a patch is correct or safe. If the existing trusted data interface can support the request, the supervisor can turn it into a frozen eval and propose a reusable harness change. A genuinely new data source or operation requires a protected contract, interface, and independent oracle before candidate selection; the gap stays queryable until those prerequisites exist.
 
 ## Source versions and activation
 

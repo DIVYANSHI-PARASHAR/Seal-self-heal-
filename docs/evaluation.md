@@ -2,19 +2,20 @@
 
 Self-Heal turns observed limitations into persistent eval cases, then accepts harness changes only when independent checks support them. The first domain is structured table analysis with a fixed contract for filters, grouping, and numeric aggregates.
 
-**Implementation status:** Phase 1 supplies immutable Atlas datasets and bounded table access. The protected generator, oracle, evaluation runner, acceptance gates, and comparative trials remain planned for Phases 2–6.
+**Implementation status:** Phase 1 supplies immutable Atlas datasets, bounded table access, and an explicit `unsupported` outcome for natural-language capability refusals. Persisted traces, capability-gap retrieval, the protected generator, oracle, evaluation runner, acceptance gates, and comparative trials remain planned for Phases 2–6.
 
 ## Creating an eval from an observation
 
-The supervisor records the task, assigned Atlas dataset ID/content hash, environment references, LangSmith trace ID, source/model/configuration identities, observed result, and violated requirement in Atlas. It reads model/tool calls and errors from LangSmith when diagnosing the incident. The trigger can be a wrong result, missing capability, resource exhaustion, or exception.
+The supervisor records the original question, interpreted task when available, assigned Atlas dataset ID/content hash, environment references, LangSmith trace ID, source/model/configuration identities, observed result, and violated requirement in Atlas. It reads model/tool calls and errors from LangSmith when diagnosing the incident. An explicit `outcome=unsupported` is tagged as a capability gap and is a trigger alongside a wrong result, resource exhaustion, or exception. It is not a successful answer merely because the conversational CLI exited normally. A zero-match total, malformed model response, or provider failure keeps its own classification.
 
 The model proposes a structured scenario within the supported contract. `evals/analyst/generator.py` validates that proposal and materializes its rows as a new immutable Atlas dataset through the trusted adapter. `evals/analyst/oracle.py` computes the correct result independently of the candidate. Freeze the dataset ID/hash, case, and expected result before patch generation, then replay the baseline on both the observed task and the generated case. The new case must also fail the old harness; separate fresh Atlas datasets stay hidden for candidate validation.
 
-An exception does not supply the correct answer. An unsupported scenario or one without trustworthy ground truth cannot authorize a behavioral change. The supervisor may record it for investigation or propose diagnostic improvements, but must not invent an expected answer just to complete the cycle.
+An exception or unsupported response does not supply the correct answer. A capability gap can drive a behavioral change only after the requested behavior, necessary data access, and independent expected result have been defined and validated. A request outside the current contract needs a protected contract/oracle extension frozen before candidate comparison. If it requires data or tools outside the trusted interface, retain the gap and proposed interface extension as an open item. Without trustworthy ground truth, the supervisor may investigate or improve diagnostics, but must not invent an expected answer just to complete the cycle.
 
 A scenario record should identify:
 
 - Task family, user-visible task, structured query/requirements, and incident provenance.
+- Original unsupported question, refusal reason, requested capability, and capability-gap classification when applicable.
 - Atlas dataset ID, row count, generation parameters, seed reference, and content hash.
 - Contract/oracle version and the protected expected-result reference.
 - Correctness invariants and externally enforced resource limits.
@@ -38,6 +39,8 @@ If final-assessment feedback guides further development, that case becomes devel
 ## Comparing baseline and candidate
 
 Run the old and new harness against the same immutable Atlas dataset ID/hash, with fresh read cursors and counters, and record the same model/settings and execution environment. Detect a changed row count or content hash before comparing trials. The baseline must fail the original requirement; the candidate must satisfy it. Neither is allowed to alter task truth or increase the acceptance budget.
+
+For a capability-gap case, reproduce the baseline's `unsupported` outcome on the original natural-language question. The candidate must produce the independently graded answer on that question and fresh paraphrases/data variations; merely suppressing the refusal is not improvement. Keep honest refusals for requests still outside scope in the regression bank.
 
 Grade outside candidate execution. LangSmith traces explain behavior and supply reported model usage; the protected grader and runner remain authoritative for correctness, tool-call count, Atlas page/byte counts, elapsed time, and budget decisions. Provide the candidate only its task and a trusted table interface bound to the assigned Atlas dataset; do not mount table snapshots, the oracle, expected answers, private controls, credentials, or entire repository. The trusted interface rejects cross-dataset access and arbitrary MongoDB queries. A candidate cannot self-report the authoritative pass/fail result or resource count.
 

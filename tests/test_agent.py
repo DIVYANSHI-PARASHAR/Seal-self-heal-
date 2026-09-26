@@ -9,7 +9,7 @@ import pytest
 
 from harness.agent import AnalystAgent
 from harness.tools import AnalystTools, ToolError
-from self_heal.cli import _parser
+from self_heal.cli import _answer_message, _parser, _present_run
 from self_heal.model import ModelReply, OpenRouterModel, ToolCall
 from self_heal.settings import load_config
 from self_heal.table_store import AtlasTableStore
@@ -86,14 +86,20 @@ def test_natural_question_rejects_ambiguous_or_invalid_interpretation():
     ambiguous = make_agent(ScriptedModel([ModelReply('{"error":"unclear metric"}', (), 40)])).run(
         "How much inventory do we have?"
     )
-    assert ambiguous.error == "Question is ambiguous or unsupported"
+    assert ambiguous.outcome == "unsupported"
+    assert ambiguous.error is None
+    assert ambiguous.answer is None
     assert ambiguous.model_calls == 1
     assert ambiguous.tool_calls == 0
     unsupported = make_agent(ScriptedModel([ModelReply('{"metric":"revenue"}', (), 40)])).run(
         "What is the revenue?"
     )
-    assert unsupported.error == "Task metric is unsupported"
+    assert unsupported.outcome == "unsupported"
+    assert unsupported.error is None
     assert unsupported.tool_calls == 0
+    malformed = make_agent(ScriptedModel([ModelReply("[]", (), 40)])).run("What is the revenue?")
+    assert malformed.outcome == "error"
+    assert malformed.error == "Question interpretation has an invalid format"
     assert make_agent(ScriptedModel([])).run(" ").error == "Question must be 1 to 2000 characters"
 
 
@@ -121,11 +127,52 @@ def test_question_interpretation_uses_the_same_token_limit():
 def test_cli_accepts_exactly_one_question_or_structured_task():
     parser = _parser()
     assert parser.parse_args(["run", "--dataset", "small", "--question", "How many units?"]).question
+    assert parser.parse_args(["run", "--dataset", "small", "--question", "How many units?", "--json"]).json
     assert parser.parse_args(["run", "--dataset", "small", "--task", '{"metric":"on_hand"}']).task
     with pytest.raises(SystemExit):
         parser.parse_args(["run", "--dataset", "small"])
     with pytest.raises(SystemExit):
         parser.parse_args(["run", "--dataset", "small", "--question", "x", "--task", "{}"])
+
+
+def test_question_cli_presents_answers_and_unsupported_questions_as_conversation(capsys):
+    model = ScriptedModel(
+        [
+            ModelReply('{"metric":"available","filter_field":"warehouse","filter_value":"East"}'),
+            call("read_rows", {"limit": 4, "filter_field": "warehouse", "filter_value": "East"}, 1),
+            ModelReply('{"value":18}'),
+        ]
+    )
+    answered = make_agent(model).run("How many available units are in East?")
+    assert _present_run(answered, conversational=True, json_output=False) == 0
+    assert capsys.readouterr().out == "There are 18 available units in the East warehouse.\n"
+
+    unsupported = make_agent(ScriptedModel([ModelReply('{"error":"unsupported"}')])).run("What is the revenue?")
+    assert _present_run(unsupported, conversational=True, json_output=False) == 0
+    assert capsys.readouterr().out == "I can't answer that with my current capabilities.\n"
+
+    assert _present_run(unsupported, conversational=True, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["outcome"] == "unsupported"
+    assert payload["answer"] is None
+    assert payload["error"] is None
+    assert payload["message"] == "I can't answer that with my current capabilities."
+
+    failed = make_agent(ScriptedModel([ModelReply("not json")])).run({"metric": "on_hand"})
+    assert _present_run(failed, conversational=True, json_output=False) == 1
+    assert "couldn't complete" in capsys.readouterr().out
+
+
+def test_conversational_answer_covers_grouped_and_zero_results():
+    grouped = _answer_message(
+        {"metric": "reserved", "group_by": "warehouse", "filter_field": "category", "filter_value": "Tools"},
+        {"groups": {"East": 2, "West": 3}},
+    )
+    assert grouped == "Reserved units by warehouse in the Tools category: East: 2; West: 3."
+    assert _answer_message(
+        {"metric": "on_hand", "filter_field": "sku", "filter_value": "missing"},
+        {"value": 0},
+    ) == "There are 0 on-hand units for SKU missing."
 
 
 def test_question_interpretation_request_omits_tool_options():
