@@ -85,6 +85,13 @@ class AtlasHistoryStore:
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         return self.runs.find_one({"_id": run_id})
 
+    def recent_runs(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        """Return compact run history ordered newest-first for the local UI."""
+
+        if not 1 <= limit <= 100:
+            raise ValueError("History limit must be between 1 and 100")
+        return list(self.runs.find({"status": "completed"}).sort("created_at", DESCENDING).limit(limit))
+
     def capability_gaps(self, *, task_family: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
         if not 1 <= limit <= 100:
             raise ValueError("History limit must be between 1 and 100")

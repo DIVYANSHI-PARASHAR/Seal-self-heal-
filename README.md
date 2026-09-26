@@ -8,6 +8,23 @@ MongoDB Atlas will hold the structured analyst tables and compact run, case, can
 
 **Status:** Phases 1 through 3 are implemented and locally tested. The base analyst reads Atlas-backed tables through three explicit tools and accepts ordinary inventory questions. The evaluator outside `harness/` generates deterministic datasets, calculates exact answers independently, and verifies the current harness against fixed scenarios. Each supervised run now has a compact Atlas history record and, when LangSmith tracing is configured, a linked root trace with nested model and tool spans. Explicit conversational refusals are stored as `outcome=unsupported` and `limitation_kind=capability_gap`, ready for Phase 4 to turn independently gradable gaps into reusable harness capabilities.
 
+## Use the local operator UI
+
+The Phase 3 UI is a browser view over the same trusted execution path as the CLI. It lists ready
+Atlas datasets, runs an inventory question, displays the result and measured resource use, links
+to verified LangSmith evidence when available, and lets an operator revisit compact run history
+or recorded capability gaps. It does not claim Phase 4 proposal, evaluation, or promotion work.
+
+Materialize a dataset, then start the loopback-only server:
+
+```sh
+uv run --env-file .env self-heal seed --fixture evals/analyst/data/small_inventory.json
+uv run --env-file .env self-heal ui
+```
+
+Open [http://127.0.0.1:4173](http://127.0.0.1:4173). Use `self-heal ui --help` for an explicit
+host or port override. The UI returns no raw table rows or full trace contents.
+
 ## Run Phases 1 through 3
 
 From the repository root, install the locked dependencies and load local credentials from the ignored `.env` file:

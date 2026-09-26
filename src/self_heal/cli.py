@@ -53,6 +53,9 @@ def _parser() -> argparse.ArgumentParser:
     attempts.add_argument("--task-family", required=True)
     attempts.add_argument("--changed-mechanism")
     attempts.add_argument("--limit", type=int, default=20, help="Maximum records to return (1-100)")
+    ui = subcommands.add_parser("ui", help="Start the local Phase 3 operator interface")
+    ui.add_argument("--host", default="127.0.0.1", help="Local address to listen on (default: 127.0.0.1)")
+    ui.add_argument("--port", type=int, default=4173, help="Local port to listen on (default: 4173)")
     return parser
 
 
@@ -255,6 +258,40 @@ def _run_history_command(args: argparse.Namespace, history: AtlasHistoryStore) -
     return 0
 
 
+def _run_ui_command(
+    args: argparse.Namespace, store: AtlasTableStore, config: AnalystConfig, history: AtlasHistoryStore
+) -> int:
+    """Start the browser surface on loopback by default.
+
+    The UI is an alternate operator interface, not a second execution path:
+    its requests instantiate the same model, runner, telemetry, and Atlas
+    history components as the existing ``run`` command.
+    """
+
+    from self_heal.web import WebApplication, create_server
+
+    api_key, model_id = agent_model_config()
+    tracing = langsmith_config()
+    application = WebApplication(
+        store=store,
+        history=history,
+        config=config,
+        telemetry=LangSmithTelemetry(tracing),
+        model_factory=lambda: OpenRouterModel(api_key, model_id),
+        tracing=tracing,
+    )
+    server = create_server(application, host=args.host, port=args.port)
+    address, port = server.server_address[:2]
+    print(f"Self-Heal UI is running at http://{address}:{port}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nSelf-Heal UI stopped.")
+    finally:
+        server.server_close()
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
@@ -275,6 +312,8 @@ def main(argv: list[str] | None = None) -> int:
                 return _run_evaluation_command(args, store, config, history)
             if args.command == "history":
                 return _run_history_command(args, history)
+            if args.command == "ui":
+                return _run_ui_command(args, store, config, history)
             task = json.loads(args.task) if args.task is not None else args.question
             if args.task is not None and not isinstance(task, dict):
                 raise ValueError("Task must be a JSON object")

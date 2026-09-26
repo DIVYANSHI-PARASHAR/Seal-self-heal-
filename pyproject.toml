@@ -31,5 +31,8 @@ harness = "harness"
 [tool.setuptools.package-data]
 "evals.analyst" = ["scenarios.yaml", "data/*.json"]
 
+[tool.setuptools.data-files]
+"share/self-heal/ui" = ["ui/index.html", "ui/app.js", "ui/styles.css", "ui/README.md"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
