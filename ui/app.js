@@ -20,10 +20,18 @@ function el(tag, className, content) {
 }
 function set(selector, value){ $(selector).textContent = value === undefined || value === null || value === "" ? "—" : String(value); }
 function announce(message){ $("[data-announcement]").textContent = message; }
-async function request(path, options){
-  const response = await fetch(path, options), body = await response.json().catch(() => ({}));
-  if(!response.ok) throw new Error(body.error || "Request failed");
-  return body;
+async function request(path, options={}){
+  const controller=new AbortController();
+  const timeout=setTimeout(()=>controller.abort(),path==="/api/runs" && options.method==="POST" ? 100000 : 15000);
+  try{
+    const response=await fetch(path,{...options,signal:controller.signal});
+    const body=await response.json().catch(() => ({}));
+    if(!response.ok)throw new Error(body.error || "Request failed");
+    return body;
+  }catch(error){
+    if(error.name==="AbortError")throw new Error("The server did not respond. Check that the UI server is running, then try again.");
+    throw error;
+  }finally{clearTimeout(timeout);}
 }
 function outcomeName(outcome){ return outcome === "answered" ? "Answered" : outcome === "unsupported" ? "Capability gap" : outcome === "error" ? "Error" : outcome || "Recorded"; }
 function date(value){ return value ? new Date(value).toLocaleString() : "—"; }
@@ -40,16 +48,19 @@ function setSource(source, clearQuestion=true){
   document.title="Self-Heal · "+(logistics ? "Logistics analyst" : "Inventory analyst");
   set("[data-ask-title]",logistics ? "Ask about shipments" : "Ask your inventory");
   question.placeholder=logistics ? "Ask about customers, shipments, and warehouses" : "Ask for available, on-hand, or reserved units by SKU, warehouse, or category";
-  set("[data-source-note]",logistics ? (source.id ? "Customers · warehouses · shipments" : "Load the public logistics bundle to run this question") : "Inventory table");
+  set("[data-source-note]",healthData && !healthData.logistics_active_version
+    ? "The server is running an older version. Stop it with Ctrl+C, then start self-heal ui again."
+    : logistics ? (source.id ? "Customers · warehouses · shipments" : "Load the public logistics bundle to run this question") : "Inventory table");
   if(healthData)set("[data-active-version]",logistics ? healthData.logistics_active_version : healthData.active_version);
   $("[data-load-logistics]").hidden=!logistics || !!source.id;
+  $("[data-load-logistics]").disabled=Boolean(healthData && !healthData.logistics_active_version);
   if(clearQuestion)question.value=logistics ? logisticsExamples[0] : "";
   closeSuggestions();updateRunButton();
 }
 async function loadDatasets(preferredId){
   const picker=$("#data-source");
   try{
-    datasets=(await request("/api/datasets")).datasets || [];
+    datasets=((await request("/api/datasets")).datasets || []).filter(item=>! /^(eval-|incident-|private-|final-)/i.test(item.id || ""));
     picker.replaceChildren();
     const logistics=datasets.filter(item=>item.input_kind==="logistics_bundle");
     const inventory=datasets.filter(item=>item.input_kind!=="logistics_bundle");
@@ -59,13 +70,18 @@ async function loadDatasets(preferredId){
     const chosen=datasets.find(item=>item.id===preferredId) || logistics[0] || (logistics.length ? inventory[0] : null);
     if(chosen){picker.value=(chosen.input_kind==="logistics_bundle" ? "logistics:" : "inventory:")+chosen.id;setSource(chosen);}
     else{picker.value="logistics:pending";setSource({input_kind:"logistics_bundle",id:""});}
-  }catch(error){picker.replaceChildren(new Option("Data sources unavailable",""));set("[data-source-note]",error.message);selectedSource=null;updateRunButton();}
+  }catch(error){
+    picker.replaceChildren(new Option("Logistics demo · load data","logistics:pending"));
+    setSource({input_kind:"logistics_bundle",id:""});
+    if(!healthData || healthData.logistics_active_version)set("[data-source-note]",error.message);
+  }
 }
 $("#data-source").addEventListener("change",event=>{
   const value=event.target.value;
   setSource(value==="logistics:pending" ? {input_kind:"logistics_bundle",id:""} : datasets.find(item=>value.endsWith(":"+item.id)) || null);
 });
 $("[data-load-logistics]").addEventListener("click",async()=>{
+  if(!serviceReady){set("[data-source-note]","Restart the UI server to enable logistics data");return;}
   const button=$("[data-load-logistics]");button.disabled=true;button.textContent="Loading logistics…";
   try{const data=await request("/api/datasets/logistics",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});await loadDatasets(data.id);announce("Logistics bundle ready");}
   catch(error){announce(error.message);set("[data-source-note]",error.message);}
@@ -345,7 +361,21 @@ $("#analysis-form").addEventListener("submit",async event=>{
   finally{updateRunButton();runButton.removeAttribute("aria-busy");runButton.innerHTML=original;}
 });
 $("[data-copy-run-id]").addEventListener("click",async()=>{if(!selectedRun)return;try{await navigator.clipboard.writeText(selectedRun.run_id);announce("Run ID copied");}catch{announce("Could not copy run ID");}});
-request("/api/health").then(data=>{healthData=data;set("[data-atlas-status]",data.atlas === "connected" ? "Atlas connected" : "Atlas unavailable");set("[data-active-version]",selectedSource?.input_kind==="logistics_bundle" ? data.logistics_active_version : data.active_version);serviceReady=true;updateRunButton();}).catch(error=>{set("[data-atlas-status]","Atlas unavailable");announce(error.message);});
+request("/api/health").then(data=>{
+  healthData=data;
+  if(!data.logistics_active_version){
+    serviceReady=false;
+    set("[data-atlas-status]","Restart UI server");
+    set("[data-source-note]","The server is running an older version. Stop it with Ctrl+C, then start self-heal ui again.");
+    $("[data-load-logistics]").disabled=true;
+    announce("Restart the UI server to enable logistics questions");
+  }else{
+    set("[data-atlas-status]",data.atlas === "connected" ? "Atlas connected" : "Atlas unavailable");
+    set("[data-active-version]",selectedSource?.input_kind==="logistics_bundle" ? data.logistics_active_version : data.active_version);
+    serviceReady=true;
+  }
+  updateRunButton();
+}).catch(error=>{set("[data-atlas-status]","Atlas unavailable");announce(error.message);});
 loadDatasets();
 loadHistory();
 showPage(location.hash.slice(1) || "ask");
