@@ -1,9 +1,10 @@
 # Self-Heal local UI
 
 This interface is a local operator surface for the implemented system. It uses the same
-trusted execution path as `self-heal run`: an analysis reads only its selected Atlas dataset,
-records compact run history, and optionally links a verified LangSmith root trace. Once a
-version is active, both surfaces execute that pinned commit in Docker.
+trusted execution path as `self-heal run`: an analysis reads only its automatically selected
+operator Atlas dataset, records compact run history, and optionally links a verified LangSmith
+root trace. Generated evaluation tables are excluded from automatic selection. Once a version
+is active, both surfaces execute that pinned commit in Docker.
 
 Start it from the repository root after configuring `.env` and materializing a dataset:
 

@@ -10,10 +10,11 @@ MongoDB Atlas holds structured analyst tables and compact run, case, candidate, 
 
 ## Use the local operator UI
 
-The operator UI is a browser view over the same trusted execution path as the CLI. It lists ready
-Atlas datasets, runs an inventory question, displays the result and measured resource use, links
-to verified LangSmith evidence when available, and lets an operator revisit compact run history
-or recorded capability gaps. Once a version is active, new UI and CLI runs use that pinned commit through the Docker runner. Evolution decisions are available through the CLI and Atlas history.
+The operator UI uses the same trusted execution path as the CLI. It automatically chooses a ready
+operator dataset, runs an inventory question, displays the answer and resource use, links to verified
+LangSmith evidence when available, and shows compact run history and capability gaps. Once a version
+is active, new UI and CLI runs use that pinned commit through the Docker runner. Evolution decisions
+are available through the CLI and Atlas history.
 
 Materialize a dataset, then start the loopback-only server:
 

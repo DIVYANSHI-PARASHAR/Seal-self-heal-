@@ -1,8 +1,8 @@
-"""Local Phase 3 web surface for the trusted Self-Heal supervisor.
+"""Local web surface for the trusted Self-Heal supervisor.
 
 The browser is deliberately thin: every run still travels through the same
-``RunExecutor`` used by the CLI, and the only history exposed is the compact
-evidence record already intended for operator inspection.  It is a local
+execution path used by the CLI, and the only history exposed is the compact
+evidence record intended for operator inspection. It is a local
 operator interface, not an internet-facing authentication boundary.
 """
 
@@ -173,14 +173,15 @@ class WebApplication:
             payload = _run_payload(execution)
             payload["question"] = request["question"]
             payload["dataset"] = {
-                "id": request["dataset_id"],
+                "id": dataset.dataset_id,
                 "row_count": dataset.row_count,
             }
             return HTTPStatus.CREATED, payload
         return HTTPStatus.NOT_FOUND, {"error": "Endpoint not found"}
 
     def _run(self, request: dict[str, str]) -> tuple[RunExecution, DatasetInfo]:
-        dataset = self.store.dataset_info(request["dataset_id"])
+        dataset_id = request.get("dataset_id")
+        dataset = self.store.dataset_info(dataset_id) if dataset_id is not None else self._default_dataset()
         active = self.history.active_version(self.config.task_family)
         if active:
             source = CandidateRepository(PROJECT_ROOT).active_checkout(active["commit"])
@@ -199,6 +200,24 @@ class WebApplication:
         )
         return execution, dataset
 
+    def _default_dataset(self) -> DatasetInfo:
+        """Choose the deterministic operator dataset for a browser run.
+
+        Keep generated evaluation tables out of automatic selection. Explicit
+        API requests can still name a dataset. Resolve the chosen dataset again
+        to verify its immutable metadata before use.
+        """
+
+        datasets = self.store.list_dataset_info()
+        if not datasets:
+            raise WebRequestError("No ready datasets are available")
+        protected_prefixes = ("eval-", "incident-", "private-")
+        selected = next((item for item in datasets
+                         if not item.dataset_id.casefold().startswith(protected_prefixes)), None)
+        if selected is None:
+            raise WebRequestError("No operator dataset is available; seed one before running a question")
+        return self.store.dataset_info(selected.dataset_id)
+
 
 def _limit(query: dict[str, list[str]]) -> int:
     value = query.get("limit", ["20"])[0]
@@ -209,14 +228,18 @@ def _limit(query: dict[str, list[str]]) -> int:
 
 
 def _run_request(body: dict[str, Any] | None) -> dict[str, str]:
-    if not isinstance(body, dict) or set(body) != {"dataset_id", "question"}:
-        raise WebRequestError("A run needs exactly dataset_id and question")
-    dataset_id, question = body["dataset_id"], body["question"]
-    if not isinstance(dataset_id, str) or not dataset_id.strip() or len(dataset_id) > 100:
-        raise WebRequestError("Dataset ID is invalid")
+    if not isinstance(body, dict) or not {"question"} <= set(body) <= {"dataset_id", "question"}:
+        raise WebRequestError("A run needs question and an optional dataset_id")
+    question = body["question"]
     if not isinstance(question, str) or not question.strip() or len(question) > 2_000:
         raise WebRequestError("Question must be 1 to 2000 characters")
-    return {"dataset_id": dataset_id.strip(), "question": question.strip()}
+    request = {"question": question.strip()}
+    if "dataset_id" in body:
+        dataset_id = body["dataset_id"]
+        if not isinstance(dataset_id, str) or not dataset_id.strip() or len(dataset_id) > 100:
+            raise WebRequestError("Dataset ID is invalid")
+        request["dataset_id"] = dataset_id.strip()
+    return request
 
 
 def create_server(application: WebApplication, host: str = "127.0.0.1", port: int = 4173) -> ThreadingHTTPServer:

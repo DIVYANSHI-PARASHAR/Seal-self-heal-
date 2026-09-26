@@ -91,28 +91,10 @@ summary:focus-visible {
   padding: 0 10px;
 }
 
-.workspace-switcher {
-  display: flex;
-  width: 100%;
-  align-items: center;
-  justify-content: space-between;
-  margin: 35px 0 14px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-small);
-  padding: 10px 11px;
-  color: var(--muted-strong);
-  background: var(--surface);
-  font-size: 14px;
-  text-align: left;
-}
-
-.workspace-switcher:hover {
-  border-color: #c9c9c9;
-}
-
 .sidebar-nav {
   display: grid;
   gap: 3px;
+  margin-top: 32px;
 }
 
 .sidebar-link {
@@ -146,30 +128,6 @@ summary:focus-visible {
   color: var(--ink);
 }
 
-.service-status {
-  display: grid;
-  gap: 10px;
-  margin-top: auto;
-  padding: 14px 10px 0;
-  border-top: 1px solid var(--line);
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.service-status span {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.service-status span::before {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--ink);
-  content: "";
-}
-
 .page-shell {
   min-width: 0;
   display: flex;
@@ -193,6 +151,14 @@ main {
 .ask-intro,
 .run-heading {
   max-width: 720px;
+}
+
+.ask-view .ask-intro {
+  margin-bottom: 29px;
+}
+
+.ask-view .ask-intro h1 {
+  margin-bottom: 0;
 }
 
 h1,
@@ -290,16 +256,10 @@ textarea::placeholder {
 .form-footer {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 20px;
   border-top: 1px solid var(--line);
   padding-top: 16px;
-}
-
-.form-footer p {
-  margin: 0;
-  color: var(--muted);
-  font-size: 13px;
 }
 
 .primary-button,

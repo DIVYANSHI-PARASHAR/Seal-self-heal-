@@ -6,12 +6,16 @@
   const tabButtons = document.querySelectorAll('[role="tab"]');
   const panels = document.querySelectorAll("[data-panel]");
   const form = document.getElementById("analysis-form");
-  const datasetField = document.getElementById("dataset");
+  const exampleQuestionField = document.getElementById("example-question");
   const questionField = document.getElementById("question");
   const runButton = document.querySelector("[data-run-button]");
-  const formStatus = document.getElementById("form-status");
   const copyButton = document.querySelector("[data-copy-run-id]");
   const state = { run: null };
+  const exampleQuestions = [
+    "How many available units are in the East warehouse?",
+    "How many available units are in the West warehouse?",
+    "What are the available units in each warehouse?"
+  ];
 
   function setView(viewName) {
     viewElements.forEach(function (view) {
@@ -50,7 +54,7 @@
   }
 
   function formatDataset(dataset) {
-    return dataset.id + " · " + dataset.row_count.toLocaleString() + " rows";
+    return dataset.id + " · " + Number(dataset.row_count).toLocaleString() + " rows";
   }
 
   function formatResources(resources) {
@@ -75,10 +79,10 @@
 
   function renderRun(run) {
     state.run = run;
-    const dataset = run.dataset || { id: datasetField.value, row_count: 0 };
+    const dataset = run.dataset || {};
     setText("[data-run-id]", run.run_id);
     setText("[data-run-question]", run.question || questionField.value.trim());
-    setText("[data-run-dataset]", dataset.row_count ? formatDataset(dataset) : dataset.id);
+    setText("[data-run-dataset]", dataset.id ? (Number.isFinite(Number(dataset.row_count)) ? formatDataset(dataset) : dataset.id) : "Dataset selected automatically");
     setText("[data-outcome]", run.outcome);
     setText("[data-run-message]", answerMessage(run));
     setText("[data-outcome-heading]", run.outcome === "answered" ? "The analyst completed this bounded run." : run.outcome === "unsupported" ? "The analyst recorded an explicit capability gap." : "The analyst could not complete this run.");
@@ -132,8 +136,9 @@
       try {
         renderRun(await request("/api/runs/" + encodeURIComponent(run.run_id)));
       } catch (error) {
-        formStatus.textContent = error.message;
         setView("ask");
+        questionField.setCustomValidity(error.message);
+        questionField.reportValidity();
       }
     });
     return row;
@@ -152,25 +157,19 @@
     renderHistory("[data-gap-list]", results[1].runs, "No explicit capability gaps have been recorded yet.");
   }
 
-  async function loadDatasets() {
-    const payload = await request("/api/datasets");
-    datasetField.replaceChildren();
-    if (!payload.datasets.length) {
-      datasetField.add(new Option("No ready datasets — seed one with the CLI first", ""));
-      formStatus.textContent = "No ready Atlas datasets were found. Seed a fixture, then refresh this page.";
-      return;
-    }
-    payload.datasets.forEach(function (dataset) {
-      datasetField.add(new Option(formatDataset(dataset), dataset.id));
+  function loadExampleQuestions() {
+    if (!exampleQuestionField) return;
+    exampleQuestionField.replaceChildren(new Option("Custom question", ""));
+    exampleQuestions.forEach(function (question) {
+      exampleQuestionField.add(new Option(question, question));
     });
-    datasetField.disabled = false;
-    runButton.disabled = false;
   }
 
   async function loadHealth() {
     const health = await request("/api/health");
     setText("[data-atlas-status]", "Atlas " + health.atlas);
     setText("[data-langsmith-status]", "LangSmith " + health.langsmith);
+    runButton.disabled = false;
   }
 
   navButtons.forEach(function (button) {
@@ -193,19 +192,36 @@
     });
   });
 
+  if (exampleQuestionField) {
+    exampleQuestionField.addEventListener("change", function () {
+      if (!exampleQuestionField.value) return;
+      questionField.value = exampleQuestionField.value;
+      questionField.setCustomValidity("");
+      questionField.focus();
+    });
+
+    questionField.addEventListener("input", function () {
+      questionField.setCustomValidity("");
+      if (exampleQuestionField.value && questionField.value !== exampleQuestionField.value) {
+        exampleQuestionField.value = "";
+      }
+    });
+  }
+
   form.addEventListener("submit", async function (event) {
     event.preventDefault();
     if (runButton.disabled) return;
+    questionField.setCustomValidity("");
     const label = runButton.textContent;
     runButton.disabled = true;
     runButton.setAttribute("aria-busy", "true");
     runButton.textContent = "Running agent…";
-    formStatus.textContent = "The supervisor is running the bounded analyst and recording evidence.";
     try {
-      const run = await request("/api/runs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ dataset_id: datasetField.value, question: questionField.value }) });
+      const run = await request("/api/runs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question: questionField.value }) });
       renderRun(run);
     } catch (error) {
-      formStatus.textContent = error.message;
+      questionField.setCustomValidity(error.message);
+      questionField.reportValidity();
     } finally {
       runButton.disabled = false;
       runButton.removeAttribute("aria-busy");
@@ -225,9 +241,10 @@
     window.setTimeout(function () { copyButton.textContent = original; }, 1400);
   });
 
-  Promise.all([loadHealth(), loadDatasets()]).catch(function (error) {
-    formStatus.textContent = error.message;
+  loadExampleQuestions();
+  loadHealth().catch(function (error) {
     setText("[data-atlas-status]", "Atlas unavailable");
     setText("[data-langsmith-status]", "LangSmith unavailable");
+    runButton.title = error.message;
   });
 })();

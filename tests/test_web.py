@@ -17,7 +17,7 @@ from self_heal.settings import LangSmithConfig, load_config
 from self_heal.storage import AtlasHistoryStore
 from self_heal.table_store import AtlasTableStore
 from self_heal.telemetry import LangSmithTelemetry
-from self_heal.web import WebApplication, create_server
+from self_heal.web import WebApplication, WebRequestError, create_server
 from self_heal.execution import RunExecution
 from harness.agent import RunResult
 from self_heal.telemetry import TraceEvidence
@@ -52,12 +52,14 @@ def unsupported_model() -> ScriptedModel:
     return ScriptedModel([ModelReply('{"error":"Revenue is outside the inventory contract"}', (), 10)])
 
 
-def make_application(model_factory):
+def make_application(model_factory, *, dataset_ids: tuple[str, ...] = ("small",)):
     config = load_config()
     database = mongomock.MongoClient()["test"]
     store = AtlasTableStore(database, config)
     store.ensure_indexes()
-    store.materialize("small", json.loads(FIXTURE.read_text(encoding="utf-8"))["rows"])
+    rows = json.loads(FIXTURE.read_text(encoding="utf-8"))["rows"]
+    for dataset_id in dataset_ids:
+        store.materialize(dataset_id, rows)
     history = AtlasHistoryStore(database)
     history.ensure_indexes()
     tracing = LangSmithConfig(enabled=False, api_key=None, project="self-heal-test", workspace_id=None)
@@ -102,6 +104,10 @@ def test_local_ui_serves_assets_and_only_dataset_metadata(local_server):
         page = response.read().decode("utf-8")
     assert "What would you like to analyze?" in page
     assert "v1 → v2" not in page
+    assert 'id="dataset"' not in page
+    assert 'id="example-question"' in page
+    assert "Current workspace" not in page
+    assert "Connected services" not in page
 
     status, datasets = request_json(local_server, "/api/datasets")
     assert status == 200
@@ -134,6 +140,37 @@ def test_local_ui_runs_the_phase_three_executor_and_exposes_compact_evidence(loc
     _, stored = request_json(local_server, "/api/runs/" + run["run_id"])
     assert stored["answer"] == {"value": 18}
     assert stored["trace"]["status"] == "disabled"
+
+
+def test_local_ui_automatically_selects_an_operator_dataset():
+    application = make_application(
+        supported_model,
+        dataset_ids=("eval-bulk-warehouse-available-v1", "incident-generated", "private-generated", "small"),
+    )
+    server = create_server(application, port=0)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address[:2]
+    try:
+        status, run = request_json(
+            f"http://{host}:{port}",
+            "/api/runs",
+            method="POST",
+            body={"question": "How many available units are in the East warehouse?"},
+        )
+        assert status == 201
+        assert run["answer"] == {"value": 18}
+        assert run["dataset"] == {"id": "small", "row_count": 6}
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)
+        server.server_close()
+
+
+def test_local_ui_never_auto_selects_a_protected_evaluation_table():
+    application = make_application(supported_model, dataset_ids=("eval-only", "incident-generated", "private-generated"))
+    with pytest.raises(WebRequestError, match="No operator dataset"):
+        application.api("POST", "/api/runs", {"question": "How many available units are in the East warehouse?"})
 
 
 def test_local_ui_records_unsupported_questions_as_capability_gaps():
@@ -184,10 +221,11 @@ def test_new_ui_task_uses_the_active_pinned_version(monkeypatch):
     monkeypatch.setattr("self_heal.web.CandidateRepository.active_checkout", active_checkout)
     monkeypatch.setattr("self_heal.web.CandidateRunner.run", candidate_run)
     status, payload = application.api("POST", "/api/runs", {
-        "dataset_id": "small", "question": "How many available units are in the East warehouse?",
+        "question": "How many available units are in the East warehouse?",
     })
     assert status == 201
     assert payload["answer"] == {"value": 18}
+    assert payload["dataset"]["id"] == "small"
     assert observed == {"commit": "accepted-commit", "source": Path("/accepted"),
                         "source_commit": "accepted-commit"}
 
@@ -202,4 +240,4 @@ def test_local_ui_rejects_malformed_run_requests(local_server):
     with pytest.raises(HTTPError) as error:
         urlopen(request, timeout=2)  # noqa: S310 -- loopback test server
     assert error.value.code == 400
-    assert json.loads(error.value.read())["error"] == "A run needs exactly dataset_id and question"
+    assert json.loads(error.value.read())["error"] == "A run needs question and an optional dataset_id"
