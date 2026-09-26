@@ -29,6 +29,7 @@ class AtlasHistoryStore:
         self.active_versions = database["active_versions"]
         self.gaps = database["capability_gaps"]
         self.selection_plans = database["selection_plans"]
+        self.final_assessments = database["final_assessments"]
 
     def ensure_indexes(self) -> None:
         """Create the Phase 3 query paths without a duplicate event collection."""
@@ -65,6 +66,9 @@ class AtlasHistoryStore:
         self.versions.create_index([("status", ASCENDING), ("created_at", DESCENDING)])
         self.gaps.create_index([("run_id", ASCENDING)], unique=True)
         self.selection_plans.create_index([("candidate_id", ASCENDING)], unique=True)
+        self.final_assessments.create_index([("case_id", ASCENDING)], unique=True)
+        self.final_assessments.create_index([("dataset.id", ASCENDING)], unique=True)
+        self.final_assessments.create_index([("commit", ASCENDING), ("started_at", DESCENDING)])
 
     def start_run(self, record: dict[str, Any]) -> None:
         self._require(record, "run_id", "_id")

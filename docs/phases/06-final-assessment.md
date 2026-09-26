@@ -2,6 +2,13 @@
 
 **Outcome:** the selected harness faces a task that did not help select or tune it, and the full improvement history is easy to inspect.
 
+**Implementation state (September 26, 2026):** the `final reserve` and `final assess` commands,
+one-use Atlas claims, protected `final-` dataset exclusion, `history lineage` and `history final`
+views, and separate UI evaluation/version pages are implemented and tested. The recorded live
+candidate was rejected, so no accepted commit or real untouched final result exists yet. The
+configured Atlas endpoint was unreachable during this update; run the commands below after the
+connection and an accepted selection are available. The end-to-end live demonstration remains open.
+
 ## Build
 
 1. Reserve a small final-assessment protocol before evolution: supported but unseen scenario parameters, new immutable Atlas datasets with frozen IDs/hashes, an independent oracle, and the same model/settings and budgets used for comparison. Keep final dataset IDs, case metadata, and expected answers inaccessible to the proposer and candidate; bind each run's table interface only to its assigned dataset and exclude final cases from candidate-selection queries.

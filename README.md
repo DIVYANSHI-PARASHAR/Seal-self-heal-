@@ -6,14 +6,16 @@ The first use case is a small Python analyst for structured tables. The editable
 
 MongoDB Atlas holds structured analyst tables and compact run, case, candidate, evaluation, gap, and version records. A trusted table interface lets each run read only its assigned dataset without exposing Atlas credentials to generated harness code. LangSmith holds detailed model and tool traces. OpenRouter supplies model calls. Candidate code runs in a local Docker container; Git pins each evaluated version.
 
-**Status:** Phases 1–5 are implemented. The Phase 4–5 control flow, selection gates, promotion, and Docker bridge pass local tests, including a real Docker run. A live bulk failure was reproduced and sent through the configured evolution model. Its recovered proposal was rejected after 28 recorded selection trials because it failed correctness and regression gates. No candidate was activated. Phase 6 final assessment remains separate.
+**Status:** Phases 1–5 and the Phase 6 reserve/assessment controls are implemented. The Phase 4–5 control flow, selection gates, promotion, and Docker bridge pass local tests, including a real Docker run. A live bulk failure was reproduced and sent through the configured evolution model. Its recovered proposal was rejected after 28 recorded selection trials because it failed correctness and regression gates. No candidate was activated, so there is no live final-assessment result yet.
 
 ## Use the local operator UI
 
 The operator UI uses the same trusted execution path as the CLI. It automatically chooses a ready
-operator dataset, runs an inventory question, displays the answer and resource use, links to verified
-LangSmith evidence when available, and shows compact run history and capability gaps on the same page.
-The form stays at the top and the selected run's result and details appear below it. Once a version
+operator dataset and has separate Ask, Runs, Evaluations, and Versions pages. The question field stays
+at the top of every page. A run detail shows its answer, resources, Atlas rows actually read, tool
+calls, timeline, verified LangSmith span metadata when available, and candidate checks for capability
+gaps. The evaluation page includes stored selection/baseline trials and final assessments, labeled by
+role. Once a version
 is active, new UI and CLI runs use that pinned commit through the Docker runner. Evolution decisions
 are available through the CLI and Atlas history.
 
@@ -21,11 +23,44 @@ Materialize a dataset, then start the loopback-only server:
 
 ```sh
 uv run --env-file .env self-heal seed --fixture evals/analyst/data/small_inventory.json
+uv run --env-file .env self-heal seed-logistics
 uv run --env-file .env self-heal ui
 ```
 
 Open [http://127.0.0.1:4173](http://127.0.0.1:4173). Use `self-heal ui --help` for an explicit
-host or port override. The UI returns no raw table rows or full trace contents.
+host or port override. The UI exposes bounded redacted snapshots of rows read during each run, not
+complete datasets or full LangSmith trace contents.
+
+The browser selects the logistics bundle by default when available. If it is not seeded yet, use
+**Load logistics demo** in the UI, or run `self-heal seed-logistics` before starting the server.
+The public bundle contains 8 customers, 3 warehouses, and 74 shipments. The current baseline
+recognizes “How many customers sent more than 15 shipments from warehouse 3 yesterday?” and records
+an honest capability gap against that bundle; it does not yet return the oracle answer. The source
+selector can switch back to an inventory table for the existing inventory questions.
+
+## Phase 6: final assessment and lineage
+
+Reserve fresh cases **before** evolving a candidate. Put the private manifest outside the checkout,
+for example in a protected temporary directory; it is created with owner-only permissions. The
+reserve command publishes two immutable `final-` Atlas datasets and stores their IDs, hashes, tasks,
+and oracle hashes in the manifest. Candidate selection rejects `final-` datasets, and the operator UI
+never selects them for ordinary questions.
+
+```sh
+uv run --env-file .env self-heal final reserve --manifest /tmp/self-heal-final-2026.json
+# Run the normal incident → evolve → selection → promotion cycle.
+uv run --env-file .env self-heal final assess --manifest /tmp/self-heal-final-2026.json
+uv run --env-file .env self-heal history final
+uv run --env-file .env self-heal history lineage --run-id <incident-run-id>
+```
+
+`final assess` requires an accepted active commit and the same config, model identity, and Docker
+image as selection. It claims each case in Atlas before the run, so a used case cannot be retried as
+untouched. Results retain individual correctness, resources, trace ID, and failure details in a
+separate `final_assessments` collection. A failed final case is consumed; reserve a new manifest for
+any later final claim. `history lineage` links the incident, capability gap, observed evaluation
+cases, exact candidate diff/commit, selection trials, active commit, and final records. A successful
+final result can only be reported after these commands actually run against an accepted version.
 
 ## Run the analyst
 

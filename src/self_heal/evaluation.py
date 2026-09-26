@@ -313,6 +313,8 @@ class SelectionEvaluator:
         invocation: dict[str, Any] | str, task: dict[str, Any] | None,
         role: str, origin: str,
     ) -> FrozenCase:
+        if dataset.dataset_id.startswith("final-"):
+            raise HistoryError("Final assessment datasets cannot enter candidate selection")
         verified = self.runner.store.dataset_info(dataset.dataset_id)
         if verified != dataset:
             raise HistoryError("Dataset changed before case freeze")

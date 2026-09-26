@@ -42,6 +42,10 @@ class DatasetBundleInfo:
     def input_kind(self) -> str:
         return "logistics_bundle"
 
+    @property
+    def row_count(self) -> int:
+        return int(self.relations["shipments"]["row_count"])
+
 
 def _canonical_hash(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
@@ -123,6 +127,9 @@ class LogisticsDatasetStore:
             raise DatasetError("Dataset is unavailable")
         self._verify(metadata)
         return self._info(metadata)
+
+    def list_dataset_info(self) -> list[DatasetBundleInfo]:
+        return [self.dataset_info(item["_id"]) for item in self._datasets.find({"status": "ready"}, {"_id": 1}).sort("_id", ASCENDING)]
 
     def open_session(self, dataset_id: str) -> "LogisticsSession":
         return LogisticsSession(self._shipments, self._warehouses, self.dataset_info(dataset_id))
@@ -243,6 +250,14 @@ class LogisticsSession:
         self._shipments, self._warehouses, self._bundle = shipments, warehouses, bundle
         self._cursor_key = secrets.token_bytes(32)
         self.pages_read = self.bytes_read = self.rows_read = 0
+
+    @property
+    def input_kind(self) -> str:
+        return "logistics_bundle"
+
+    @property
+    def dataset_id(self) -> str:
+        return self._bundle.dataset_id
 
     def inspect_catalog(self) -> dict[str, Any]:
         return {"input_kind": self._bundle.input_kind, "domain": self._bundle.domain, "relations": {name: {"row_count": value["row_count"]} for name, value in self._bundle.relations.items()}, "reporting_timezone": self._bundle.reporting_timezone}

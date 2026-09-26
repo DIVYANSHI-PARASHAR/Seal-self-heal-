@@ -14,6 +14,7 @@ import os
 import re
 import sysconfig
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import date, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -21,7 +22,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from harness.agent import RunResult
+from harness.agent import RunResult, logistics_capability_request
 from harness.tools import AnalystTools
 from self_heal.execution import RunExecution, RunExecutor
 from self_heal.model import ChatModel
@@ -32,6 +33,9 @@ from self_heal.telemetry import LangSmithTelemetry
 from self_heal.repository import CandidateRepository
 from self_heal.runner import CandidateRunner
 from self_heal.evidence import safe_payload
+from self_heal.logistics_store import LogisticsDatasetStore
+from self_heal.contracts import canonical_hash
+from evals.logistics.generator import public_incident_bundle
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -39,10 +43,28 @@ _SOURCE_ASSET_ROOT = PROJECT_ROOT / "ui"
 _INSTALLED_ASSET_ROOT = Path(sysconfig.get_path("data")) / "share" / "self-heal" / "ui"
 ASSET_ROOT = _SOURCE_ASSET_ROOT if _SOURCE_ASSET_ROOT.is_dir() else _INSTALLED_ASSET_ROOT
 MAX_REQUEST_BYTES = 8_192
+PROTECTED_DATASET_PREFIXES = ("eval-", "incident-", "private-", "final-")
+
+
+def _operator_dataset(dataset_id: str) -> bool:
+    return not dataset_id.casefold().startswith(PROTECTED_DATASET_PREFIXES)
 
 
 class WebRequestError(ValueError):
     """An input error that is safe to present to a local operator."""
+
+
+class _LogisticsBaselineTools:
+    """The current baseline has no model-facing logistics aggregation tool."""
+
+    def __init__(self, table: Any) -> None:
+        self.table = table
+
+    def definitions(self) -> list[dict[str, Any]]:
+        return []
+
+    def execute(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        raise WebRequestError("No logistics tool is active in this version")
 
 
 def _result_message(result: RunResult) -> str:
@@ -154,6 +176,7 @@ class WebApplication:
         telemetry: LangSmithTelemetry,
         model_factory: Callable[[], ChatModel],
         tracing: LangSmithConfig,
+        logistics: LogisticsDatasetStore | None = None,
     ) -> None:
         self.store = store
         self.history = history
@@ -161,6 +184,7 @@ class WebApplication:
         self.telemetry = telemetry
         self.model_factory = model_factory
         self.tracing = tracing
+        self.logistics = logistics
 
     def api(self, method: str, path: str, body: dict[str, Any] | None = None) -> tuple[int, dict[str, Any]]:
         """Dispatch a small same-origin API.  This method has no HTTP concerns."""
@@ -169,21 +193,58 @@ class WebApplication:
         query = parse_qs(route.query)
         if method == "GET" and route.path == "/api/health":
             active = self.history.active_version(self.config.task_family)
+            logistics_active = self.history.active_version("logistics-shipment-threshold")
             return HTTPStatus.OK, {
                 "atlas": "connected",
                 "langsmith": "enabled" if self.tracing.enabled else "disabled",
                 "task_contract_version": self.config.task_contract_version,
                 "active_version": active.get("commit") if active else self.config.task_contract_version,
+                "logistics_active_version": logistics_active.get("commit") if logistics_active else "logistics-shipment-threshold-v1",
             }
         if method == "GET" and route.path == "/api/datasets":
             return HTTPStatus.OK, {
-                "datasets": [
-                    {"id": item.dataset_id, "row_count": item.row_count, "content_hash": item.content_hash}
-                    for item in self.store.list_dataset_info()
-                ]
+                "datasets": ([
+                    {"id": item.dataset_id, "row_count": item.row_count, "content_hash": item.content_hash,
+                     "input_kind": "inventory_table", "domain": "inventory"}
+                    for item in self.store.list_dataset_info() if _operator_dataset(item.dataset_id)
+                ] + ([{"id": item.dataset_id, "row_count": item.row_count,
+                       "content_hash": item.content_hash, "input_kind": "logistics_bundle",
+                       "domain": item.domain, "relations": {name: value["row_count"] for name, value in item.relations.items()}}
+                      for item in self.logistics.list_dataset_info() if _operator_dataset(item.dataset_id)]
+                     if self.logistics is not None else []))
             }
         if method == "GET" and route.path == "/api/runs":
             return HTTPStatus.OK, {"runs": [_history_summary(item) for item in self.history.recent_runs(limit=_limit(query))]}
+        if method == "GET" and route.path == "/api/evaluations":
+            records = self.history.evaluations.find({}).sort("created_at", -1).limit(_limit(query))
+            ordinary = [{
+                "evaluation_id": item.get("evaluation_id"), "case_id": item.get("case_id"),
+                "run_id": item.get("run_id"), "passed": item.get("passed"),
+                "violation": item.get("violation"), "resources": item.get("resources"),
+                "trace_id": item.get("trace_id"), "created_at": item.get("created_at"),
+                "role": item.get("role") or (item.get("candidate") or {}).get("role") or "Selection / baseline",
+            } for item in records]
+            finals = self.history.final_assessments.find({"status": {"$in": ["completed", "failed"]}}).sort("started_at", -1).limit(_limit(query))
+            final_rows = [{"evaluation_id": item.get("case_id"), "case_id": item.get("case_id"),
+                           "run_id": item.get("run_id"), "passed": item.get("passed"),
+                           "violation": item.get("violation"), "resources": item.get("resources"),
+                           "trace_id": item.get("trace_id"), "created_at": item.get("completed_at"),
+                           "role": "Final assessment"} for item in finals]
+            return HTTPStatus.OK, {"evaluations": sorted(ordinary + final_rows,
+                              key=lambda item: str(item.get("created_at") or ""),
+                              reverse=True)[:_limit(query)]}
+        if method == "GET" and route.path == "/api/versions":
+            family = query.get("task_family", [self.config.task_family])[0]
+            if family not in {self.config.task_family, "logistics-shipment-threshold"}:
+                raise WebRequestError("Task family is invalid")
+            active = self.history.active_version(family)
+            records = self.history.versions.find({"task_family": family}).sort("created_at", -1).limit(_limit(query))
+            return HTTPStatus.OK, {"active_commit": active.get("commit") if active else None,
+                                   "base_version": "logistics-shipment-threshold-v1" if family == "logistics-shipment-threshold" else self.config.task_contract_version,
+                                   "versions": [{"version_id": item.get("version_id"),
+                                                 "commit": item.get("commit"), "status": item.get("status"),
+                                                 "parent_commit": item.get("parent_commit"),
+                                                 "created_at": item.get("created_at")} for item in records]}
         if method == "GET" and route.path == "/api/capability-gaps":
             return HTTPStatus.OK, {
                 "runs": [_history_summary(item) for item in self.history.capability_gaps(limit=_limit(query))]
@@ -197,7 +258,7 @@ class WebApplication:
                 return HTTPStatus.NOT_FOUND, {"error": "Run history is unavailable"}
             payload = _history_summary(record, detail=True)
             if record.get("outcome") == "unsupported":
-                payload["gap"] = self._gap_evidence(run_id)
+                payload["gap"] = self._gap_evidence(run_id, (record.get("invocation") or {}).get("task_family"))
             trace = record.get("trace") or {}
             if trace.get("status") == "available" and trace.get("root_id"):
                 try:
@@ -227,19 +288,28 @@ class WebApplication:
             payload["dataset"] = {
                 "id": dataset.dataset_id,
                 "row_count": dataset.row_count,
+                "input_kind": getattr(dataset, "input_kind", "inventory_table"),
+                "domain": getattr(dataset, "domain", "inventory"),
+                "relations": {name: value["row_count"] for name, value in dataset.relations.items()} if hasattr(dataset, "relations") else None,
             }
             record = self.history.get_run(payload["run_id"])
             if record:
                 payload = _history_summary(record, detail=True) | {"history": payload["history"], "message": payload["message"],
                                                         "dataset": payload["dataset"],
-                                                        "gap": self._gap_evidence(payload["run_id"]) if payload["outcome"] == "unsupported" else None}
+                                                        "gap": self._gap_evidence(payload["run_id"], (record.get("invocation") or {}).get("task_family")) if payload["outcome"] == "unsupported" else None}
             return HTTPStatus.CREATED, payload
+        if method == "POST" and route.path == "/api/datasets/logistics":
+            if body != {} or self.logistics is None:
+                raise WebRequestError("Logistics demo dataset is unavailable")
+            info = self.logistics.materialize("logistics-shipment-threshold-public-v1", **public_incident_bundle())
+            return HTTPStatus.CREATED, {"id": info.dataset_id, "input_kind": info.input_kind,
+                                        "relations": {name: value["row_count"] for name, value in info.relations.items()}}
         return HTTPStatus.NOT_FOUND, {"error": "Endpoint not found"}
 
-    def _gap_evidence(self, run_id: str) -> dict[str, Any]:
+    def _gap_evidence(self, run_id: str, task_family: str | None = None) -> dict[str, Any]:
         gap = self.history.get_gap(run_id)
         candidates = list(self.history.candidates.find({"incident_run_id": run_id}).sort("created_at", -1).limit(10))
-        active = self.history.active_version(self.config.task_family)
+        active = self.history.active_version(task_family or self.config.task_family)
         cases = list(self.history.eval_cases.find({"scenario_id": {"$regex": "^observed-" + re.escape(run_id.replace("-", "")[:24])}}))
         result = []
         for candidate in candidates:
@@ -256,12 +326,31 @@ class WebApplication:
                 "diff_url": "/api/candidates/" + candidate["candidate_id"] + "/diff" if candidate.get("diff") else None,
             })
         return {"status": gap.get("status") if gap else "not evaluated",
-                "active_version": active.get("commit") if active else self.config.task_contract_version,
+                "active_version": active.get("commit") if active else ("logistics-shipment-threshold-v1" if task_family == "logistics-shipment-threshold" else self.config.task_contract_version),
                 "cases": [{"id": case["case_id"], "url": "/api/evaluation-cases/" + case["case_id"]} for case in cases],
                 "candidates": result}
 
     def _run(self, request: dict[str, str]) -> tuple[RunExecution, DatasetInfo]:
         dataset_id = request.get("dataset_id")
+        if dataset_id is not None and not _operator_dataset(dataset_id):
+            raise WebRequestError("Protected evaluation datasets are unavailable to operator runs")
+        if request.get("input_kind") == "logistics_bundle":
+            if self.logistics is None or not dataset_id:
+                raise WebRequestError("Select a ready logistics bundle before running this question")
+            if logistics_capability_request(request["question"]) is None:
+                raise WebRequestError("This version only recognizes the customer shipment threshold question")
+            if self.history.active_version("logistics-shipment-threshold"):
+                raise WebRequestError("The active logistics version needs a compatible runner before browser execution")
+            dataset = self.logistics.dataset_info(dataset_id)
+            contract = (self.config.task_contracts or {}).get("logistics-shipment-threshold-v1")
+            if not contract:
+                raise WebRequestError("Logistics task contract is unavailable")
+            logistics_config = replace(self.config, task_family="logistics-shipment-threshold",
+                task_contract_version="logistics-shipment-threshold-v1", contract_hash=canonical_hash(contract))
+            execution = RunExecutor(history=self.history, telemetry=self.telemetry, config=logistics_config).run(
+                model=self.model_factory(), tools=_LogisticsBaselineTools(self.logistics.open_session(dataset_id)),
+                dataset=dataset, invocation=request["question"])
+            return execution, dataset
         dataset = self.store.dataset_info(dataset_id) if dataset_id is not None else self._default_dataset()
         active = self.history.active_version(self.config.task_family)
         if active:
@@ -292,9 +381,8 @@ class WebApplication:
         datasets = self.store.list_dataset_info()
         if not datasets:
             raise WebRequestError("No ready datasets are available")
-        protected_prefixes = ("eval-", "incident-", "private-")
         selected = next((item for item in datasets
-                         if not item.dataset_id.casefold().startswith(protected_prefixes)), None)
+                         if _operator_dataset(item.dataset_id)), None)
         if selected is None:
             raise WebRequestError("No operator dataset is available; seed one before running a question")
         return self.store.dataset_info(selected.dataset_id)
@@ -309,12 +397,16 @@ def _limit(query: dict[str, list[str]]) -> int:
 
 
 def _run_request(body: dict[str, Any] | None) -> dict[str, str]:
-    if not isinstance(body, dict) or not {"question"} <= set(body) <= {"dataset_id", "question"}:
+    if not isinstance(body, dict) or not {"question"} <= set(body) <= {"dataset_id", "question", "input_kind"}:
         raise WebRequestError("A run needs question and an optional dataset_id")
     question = body["question"]
     if not isinstance(question, str) or not question.strip() or len(question) > 2_000:
         raise WebRequestError("Question must be 1 to 2000 characters")
     request = {"question": question.strip()}
+    if "input_kind" in body:
+        if body["input_kind"] not in {"inventory_table", "logistics_bundle"}:
+            raise WebRequestError("Input kind is invalid")
+        request["input_kind"] = body["input_kind"]
     if "dataset_id" in body:
         dataset_id = body["dataset_id"]
         if not isinstance(dataset_id, str) or not dataset_id.strip() or len(dataset_id) > 100:

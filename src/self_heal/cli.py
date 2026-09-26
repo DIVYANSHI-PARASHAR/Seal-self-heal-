@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +17,7 @@ from evals.analyst.generator import ScenarioError, load_scenarios, materialize_c
 from evals.analyst.oracle import OracleError
 from harness.agent import RunResult
 from harness.tools import AnalystTools
-from self_heal.contracts import build_eval_case_record, stable_case_id, utc_now
+from self_heal.contracts import build_eval_case_record, stable_case_id, utc_now, canonical_hash, model_identity
 from self_heal.evaluation import EvaluationRunner, baseline_expectation_matches
 from self_heal.execution import RunExecution, RunExecutor
 from self_heal.model import OpenRouterModel
@@ -29,6 +30,9 @@ from self_heal.repository import CandidateRepository, PatchRejected
 from self_heal.runner import CandidateRunner, RunnerError
 from self_heal.promotion import PromotionManager, PromotionRejected
 from self_heal.settings import evolution_model_config
+from self_heal.final_assessment import FinalAssessmentError, reserve_cases, assess_cases
+from self_heal.logistics_store import LogisticsDatasetStore
+from evals.logistics.generator import public_incident_bundle
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -36,6 +40,7 @@ def _parser() -> argparse.ArgumentParser:
     subcommands = parser.add_subparsers(dest="command", required=True)
     seed = subcommands.add_parser("seed", help="Materialize an immutable table in Atlas")
     seed.add_argument("--fixture", required=True, type=Path, help="JSON dataset definition")
+    subcommands.add_parser("seed-logistics", help="Materialize the public customers/warehouses/shipments bundle")
     run = subcommands.add_parser("run", help="Run an analyst task against an Atlas dataset")
     task_input = run.add_mutually_exclusive_group(required=True)
     task_input.add_argument("--task", help="JSON task object for reproducible runs")
@@ -60,6 +65,15 @@ def _parser() -> argparse.ArgumentParser:
     attempts.add_argument("--changed-mechanism")
     attempts.add_argument("--limit", type=int, default=20, help="Maximum records to return (1-100)")
     active = history_commands.add_parser("active", help="Show the active pinned harness version")
+    lineage = history_commands.add_parser("lineage", help="Show an incident, cases, candidates, trials, and final outcomes")
+    lineage.add_argument("--run-id", required=True)
+    history_commands.add_parser("final", help="Show final assessment attempts separately from selection")
+    final = subcommands.add_parser("final", help="Reserve and run one-use untouched assessment cases")
+    final_commands = final.add_subparsers(dest="final_command", required=True)
+    final_reserve = final_commands.add_parser("reserve", help="Publish fresh final datasets and a protected manifest")
+    final_reserve.add_argument("--manifest", required=True, type=Path, help="New manifest path outside the checkout")
+    final_assess = final_commands.add_parser("assess", help="Run active commit once on reserved cases")
+    final_assess.add_argument("--manifest", required=True, type=Path, help="Protected manifest path")
     evolve = subcommands.add_parser("evolve", help="Diagnose and evolve one recorded limitation")
     evolve.add_argument("--run-id", required=True, help="Completed Atlas run ID")
     evolve.add_argument("--rescreen-candidate", help="Retry one stored patch after a screening fix")
@@ -255,6 +269,34 @@ def _run_history_command(args: argparse.Namespace, history: AtlasHistoryStore) -
             raise ValueError("Run history is unavailable")
         _emit(_history_run_summary(record))
         return 0
+    if args.history_command == "final":
+        records = history.final_assessments.find({}).sort("started_at", -1).limit(50)
+        _emit({"final_assessments": [{key: value for key, value in record.items() if key != "_id"} for record in records]})
+        return 0
+    if args.history_command == "lineage":
+        incident = history.get_run(args.run_id)
+        if incident is None:
+            raise ValueError("Run history is unavailable")
+        candidates = list(history.candidates.find({"incident_run_id": args.run_id}).sort("created_at", 1))
+        cases = list(history.eval_cases.find({"scenario_id": {"$regex": "^observed-" + args.run_id.replace("-", "")[:24]}}))
+        candidate_summaries = []
+        for candidate in candidates:
+            selection = candidate.get("selection") or {}
+            candidate_summaries.append({
+                "candidate_id": candidate.get("candidate_id"), "status": candidate.get("status"),
+                "hypothesis": candidate.get("hypothesis"), "changed_mechanism": candidate.get("changed_mechanism"),
+                "parent_commit": candidate.get("parent_commit"), "candidate_commit": candidate.get("candidate_commit"),
+                "diff": candidate.get("diff"), "accepted": selection.get("accepted"),
+                "reasons": selection.get("reasons"), "trials": selection.get("trials", []),
+            })
+        active = history.active_version(load_config().task_family)
+        final_records = list(history.final_assessments.find({"commit": active.get("commit")}).sort("started_at", 1)) if active else []
+        _emit({"incident": _history_run_summary(incident), "gap": history.get_gap(args.run_id),
+               "cases": [{"case_id": item.get("case_id"), "scenario_id": item.get("scenario_id"),
+                          "dataset": item.get("dataset"), "exposures": item.get("exposures")} for item in cases],
+               "candidates": candidate_summaries, "active_commit": active.get("commit") if active else None,
+               "final_assessments": [{key: value for key, value in record.items() if key != "_id"} for record in final_records]})
+        return 0
     records = history.candidates_for(
         task_family=args.task_family,
         changed_mechanism=args.changed_mechanism,
@@ -280,7 +322,8 @@ def _run_history_command(args: argparse.Namespace, history: AtlasHistoryStore) -
 
 
 def _run_ui_command(
-    args: argparse.Namespace, store: AtlasTableStore, config: AnalystConfig, history: AtlasHistoryStore
+    args: argparse.Namespace, store: AtlasTableStore, config: AnalystConfig, history: AtlasHistoryStore,
+    logistics: LogisticsDatasetStore,
 ) -> int:
     """Start the browser surface on loopback by default.
 
@@ -300,6 +343,7 @@ def _run_ui_command(
         telemetry=LangSmithTelemetry(tracing),
         model_factory=lambda: OpenRouterModel(api_key, model_id),
         tracing=tracing,
+        logistics=logistics,
     )
     server = create_server(application, host=args.host, port=args.port)
     address, port = server.server_address[:2]
@@ -330,13 +374,57 @@ def main(argv: list[str] | None = None) -> int:
             store.ensure_indexes()
             history = AtlasHistoryStore(client[database_name])
             history.ensure_indexes()
+            logistics = LogisticsDatasetStore(client[database_name])
+            logistics.ensure_indexes()
             if args.command == "seed":
                 fixture = json.loads(args.fixture.read_text(encoding="utf-8"))
                 info = store.materialize(fixture["dataset_id"], fixture["rows"])
                 _emit({"dataset_id": info.dataset_id, "row_count": info.row_count, "content_hash": info.content_hash})
                 return 0
+            if args.command == "seed-logistics":
+                info = logistics.materialize("logistics-shipment-threshold-public-v1", **public_incident_bundle())
+                _emit({"dataset_id": info.dataset_id, "input_kind": info.input_kind,
+                       "relations": {name: value["row_count"] for name, value in info.relations.items()},
+                       "content_hash": info.content_hash})
+                return 0
             if args.command == "eval":
                 return _run_evaluation_command(args, store, config, history)
+            if args.command == "final":
+                if args.final_command == "reserve":
+                    _emit(reserve_cases(store, config, manifest=args.manifest, checkout=Path.cwd()))
+                    return 0
+                api_key, model_id = agent_model_config()
+                telemetry = LangSmithTelemetry(langsmith_config())
+                runner = CandidateRunner(store=store, config=config, history=history,
+                                         telemetry=telemetry, image=image)
+                active = history.active_version(config.task_family)
+                if not active:
+                    raise FinalAssessmentError("An accepted active commit is required for final assessment")
+                plan = history.selection_plans.find_one({"candidate_commit": active["commit"]})
+                if not plan or not (history.candidates.find_one({"candidate_id": plan["candidate_id"]}) or {}).get("selection", {}).get("accepted"):
+                    raise FinalAssessmentError("Active commit has no accepted selection record")
+                reserved_at = datetime.fromisoformat(json.loads(args.manifest.read_text(encoding="utf-8"))["reserved_at"])
+                selected_at = plan["created_at"]
+                if selected_at.tzinfo is None:
+                    selected_at = selected_at.replace(tzinfo=timezone.utc)
+                if reserved_at >= selected_at:
+                    raise FinalAssessmentError("Final cases must be reserved before candidate selection")
+                current_identity = {"candidate_commit": active["commit"],
+                                    "parent_commit": plan["parent_commit"],
+                                    "config_hash": config.config_hash,
+                                    "image": runner.image_identity(),
+                                    "model": model_identity(OpenRouterModel(api_key, model_id))}
+                if canonical_hash(current_identity) != plan["environment_hash"]:
+                    raise FinalAssessmentError("Model, configuration, or runner image differs from selection")
+                source = CandidateRepository(Path.cwd()).active_checkout(active["commit"])
+                results = assess_cases(store, history, config, manifest=args.manifest, checkout=Path.cwd(),
+                    run=lambda dataset, question, case_id: runner.run(
+                        source=source, source_commit=active["commit"], dataset=dataset,
+                        invocation=question, model=OpenRouterModel(api_key, model_id),
+                        case_id=case_id, case_exposure="final"))
+                _emit({"commit": active["commit"], "final_assessments": results,
+                       "passed": all(item["passed"] for item in results)})
+                return 0 if all(item["passed"] for item in results) else 1
             if args.command == "history":
                 return _run_history_command(args, history)
             if args.command == "rollback":
@@ -368,7 +456,7 @@ def main(argv: list[str] | None = None) -> int:
                 _emit(display)
                 return 0 if result["status"] == "activated" else 1
             if args.command == "ui":
-                return _run_ui_command(args, store, config, history)
+                return _run_ui_command(args, store, config, history, logistics)
             task = json.loads(args.task) if args.task is not None else args.question
             if args.task is not None and not isinstance(task, dict):
                 raise ValueError("Task must be a JSON object")
@@ -400,7 +488,7 @@ def main(argv: list[str] | None = None) -> int:
                 json_output=args.json,
                 execution=execution,
             )
-    except (ValueError, KeyError, TypeError, json.JSONDecodeError, DatasetError, ScenarioError, OracleError, HistoryError,
+    except (ValueError, KeyError, TypeError, json.JSONDecodeError, DatasetError, ScenarioError, OracleError, HistoryError, FinalAssessmentError,
             RunnerError, PatchRejected, PromotionRejected, EvolutionBlocked) as exc:
         _emit({"error": str(exc)})
         return 2

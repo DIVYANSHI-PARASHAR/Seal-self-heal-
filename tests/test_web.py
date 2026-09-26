@@ -21,6 +21,8 @@ from self_heal.web import WebApplication, WebRequestError, create_server
 from self_heal.execution import RunExecution
 from harness.agent import RunResult
 from self_heal.telemetry import TraceEvidence
+from self_heal.contracts import utc_now
+from self_heal.logistics_store import LogisticsDatasetStore
 
 
 FIXTURE = Path(__file__).resolve().parents[1] / "evals" / "analyst" / "data" / "small_inventory.json"
@@ -115,7 +117,8 @@ def test_local_ui_serves_assets_and_only_dataset_metadata(local_server):
 
     status, datasets = request_json(local_server, "/api/datasets")
     assert status == 200
-    assert datasets["datasets"] == [{"id": "small", "row_count": 6, "content_hash": datasets["datasets"][0]["content_hash"]}]
+    assert datasets["datasets"] == [{"id": "small", "row_count": 6, "content_hash": datasets["datasets"][0]["content_hash"],
+                                     "input_kind": "inventory_table", "domain": "inventory"}]
     assert "A-100" not in repr(datasets)
 
     with pytest.raises(HTTPError) as error:
@@ -133,7 +136,7 @@ def test_local_ui_runs_the_phase_three_executor_and_exposes_compact_evidence(loc
     assert status == 201
     assert run["outcome"] == "answered"
     assert run["answer"] == {"value": 18}
-    assert run["dataset"] == {"id": "small", "row_count": 6}
+    assert run["dataset"] == {"id": "small", "row_count": 6, "input_kind": "inventory_table", "domain": "inventory", "relations": None}
     assert run["resources"]["table_pages"] == 1
     assert run["history"]["status"] == "recorded"
     assert run["trace"]["status"] == "disabled"
@@ -168,13 +171,33 @@ def test_local_ui_automatically_selects_an_operator_dataset():
         )
         assert status == 201
         assert run["answer"] == {"value": 18}
-        assert run["dataset"] == {"id": "small", "row_count": 6}
+        assert run["dataset"] == {"id": "small", "row_count": 6, "input_kind": "inventory_table", "domain": "inventory", "relations": None}
     finally:
         server.shutdown()
         thread.join(timeout=2)
         server.server_close()
 
 
+def test_logistics_ui_loads_public_bundle_and_records_honest_gap():
+    app = make_application(supported_model)
+    app.logistics = LogisticsDatasetStore(app.history.runs.database)
+    app.logistics.ensure_indexes()
+    status, seeded = app.api("POST", "/api/datasets/logistics", {})
+    assert status == 201
+    assert seeded["relations"] == {"customers": 8, "warehouses": 3, "shipments": 74}
+    _, sources = app.api("GET", "/api/datasets")
+    assert any(item["input_kind"] == "logistics_bundle" for item in sources["datasets"])
+    _, run = app.api("POST", "/api/runs", {"input_kind": "logistics_bundle", "dataset_id": seeded["id"],
+        "question": "How many customers sent more than 15 shipments from warehouse 3 yesterday?"})
+    assert run["outcome"] == "unsupported"
+    assert run["capability_request"]["kind"] == "shipment_customer_threshold"
+    assert run["resources"]["model_calls"] == run["resources"]["tool_calls"] == run["resources"]["table_pages"] == 0
+    assert run["dataset"]["relations"]["shipments"] == 74
+    _, stored = app.api("GET", "/api/runs/" + run["run_id"])
+    assert stored["dataset"]["input_kind"] == "logistics_bundle"
+    assert stored["dataset"]["relations"]["customers"]["row_count"] == 8
+    assert stored["gap"]["active_version"] == "logistics-shipment-threshold-v1"
+    assert app.history.get_run(run["run_id"])["invocation"]["task_family"] == "logistics-shipment-threshold"
 def test_local_ui_never_auto_selects_a_protected_evaluation_table():
     application = make_application(supported_model, dataset_ids=("eval-only", "incident-generated", "private-generated"))
     with pytest.raises(WebRequestError, match="No operator dataset"):
@@ -245,6 +268,23 @@ def test_no_tool_run_reports_explicit_zero_evidence():
     assert detail["evidence"]["tool_calls"] == []
     assert detail["evidence"]["atlas"]["pages"] == []
     assert detail["evidence"]["atlas"]["row_count"] == 0
+
+
+def test_evaluation_and_version_pages_use_stored_records_without_exposing_final_data():
+    app = make_application(supported_model, dataset_ids=("small", "final-secret"))
+    _, datasets = app.api("GET", "/api/datasets")
+    assert [item["id"] for item in datasets["datasets"]] == ["small"]
+    with pytest.raises(WebRequestError, match="Protected evaluation"):
+        app.api("POST", "/api/runs", {"dataset_id": "final-secret", "question": "What is available?"})
+    app.history.final_assessments.insert_one({"_id": "final-1", "case_id": "final-1",
+        "status": "completed", "passed": False, "violation": "wrong_or_missing_answer",
+        "run_id": "run-1", "commit": "abc", "started_at": utc_now(), "completed_at": utc_now()})
+    _, evaluations = app.api("GET", "/api/evaluations")
+    assert evaluations["evaluations"][0]["role"] == "Final assessment"
+    assert evaluations["evaluations"][0]["passed"] is False
+    _, versions = app.api("GET", "/api/versions")
+    assert versions["active_commit"] is None
+    assert versions["base_version"] == app.config.task_contract_version
 
 
 def test_new_ui_task_uses_the_active_pinned_version(monkeypatch):
