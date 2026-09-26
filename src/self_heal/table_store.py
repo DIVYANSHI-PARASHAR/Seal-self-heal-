@@ -99,6 +99,19 @@ class AtlasTableStore:
         self._verify_published(metadata)
         return TableSession(self._rows, metadata, self._config)
 
+    def dataset_info(self, dataset_id: str) -> DatasetInfo:
+        """Return verified immutable metadata for a dataset bound to a supervisor run."""
+
+        metadata = self._datasets.find_one({"_id": dataset_id, "status": "ready"})
+        if not metadata:
+            raise DatasetError("Dataset is unavailable")
+        self._verify_published(metadata)
+        return DatasetInfo(
+            dataset_id=metadata["_id"],
+            row_count=metadata["row_count"],
+            content_hash=metadata["content_hash"],
+        )
+
     def _verify_published(self, metadata: Mapping[str, Any]) -> None:
         dataset_id = metadata["_id"]
         documents = list(

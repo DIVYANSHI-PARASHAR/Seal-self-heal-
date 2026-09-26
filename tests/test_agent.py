@@ -89,6 +89,8 @@ def test_natural_question_rejects_ambiguous_or_invalid_interpretation():
     assert ambiguous.outcome == "unsupported"
     assert ambiguous.error is None
     assert ambiguous.answer is None
+    assert ambiguous.limitation_kind == "capability_gap"
+    assert ambiguous.limitation_reason == "Question is ambiguous or unsupported"
     assert ambiguous.model_calls == 1
     assert ambiguous.tool_calls == 0
     unsupported = make_agent(ScriptedModel([ModelReply('{"metric":"revenue"}', (), 40)])).run(
@@ -101,6 +103,13 @@ def test_natural_question_rejects_ambiguous_or_invalid_interpretation():
     assert malformed.outcome == "error"
     assert malformed.error == "Question interpretation has an invalid format"
     assert make_agent(ScriptedModel([])).run(" ").error == "Question must be 1 to 2000 characters"
+
+
+def test_supervisor_can_supply_the_run_id_used_for_linked_evidence():
+    result = make_agent(ScriptedModel([ModelReply('{"error":"unsupported"}', (), 1)])).run(
+        "What is revenue?", run_id="linked-run-id"
+    )
+    assert result.run_id == "linked-run-id"
 
 
 def test_question_interpretation_uses_the_same_model_call_limit():
@@ -129,6 +138,7 @@ def test_cli_accepts_exactly_one_question_or_structured_task():
     assert parser.parse_args(["run", "--dataset", "small", "--question", "How many units?"]).question
     assert parser.parse_args(["run", "--dataset", "small", "--question", "How many units?", "--json"]).json
     assert parser.parse_args(["run", "--dataset", "small", "--task", '{"metric":"on_hand"}']).task
+    assert parser.parse_args(["history", "capability-gaps", "--task-family", "inventory-totals"]).history_command == "capability-gaps"
     with pytest.raises(SystemExit):
         parser.parse_args(["run", "--dataset", "small"])
     with pytest.raises(SystemExit):

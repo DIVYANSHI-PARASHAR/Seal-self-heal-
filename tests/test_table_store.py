@@ -34,6 +34,12 @@ def test_materialization_is_idempotent_and_detects_tampering():
         store.open_session("small")
 
 
+def test_dataset_info_is_verified_before_the_supervisor_records_it():
+    store, _, _, rows = make_store()
+    published = store.materialize("small", rows)
+    assert store.dataset_info("small") == published
+
+
 def test_scoped_pages_filters_and_cursors():
     store, _, config, rows = make_store()
     store.materialize("small", rows)

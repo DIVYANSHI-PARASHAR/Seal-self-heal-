@@ -2,6 +2,8 @@
 
 **Outcome:** every task run has a detailed LangSmith trace and a linked Atlas history record. Explicit unsupported responses are queryable capability-gap observations for later evaluation and harness evolution; table data remains in the Atlas dataset collections created in Phase 1.
 
+**Status:** Implemented. The trusted supervisor now gives each interactive and evaluation run one shared UUID across the agent, LangSmith root trace, and compact Atlas `runs` record. It records `eval_cases`, `evaluations`, future-facing `candidates`, and `versions` collections with indexed identities, uses `wrap_openai` for OpenRouter-compatible calls, adds model and tool spans, and redacts secrets, table rows, and aggregate answers before trace upload. Trace upload or immediate lookup failures remain explicit `incomplete` evidence and do not alter the agent outcome.
+
 ## Build
 
 1. Implement `src/self_heal/contracts.py` for stable task/run/case/candidate/trial/version IDs and linked records. Include the source commit, config hash, model ID/settings, Atlas dataset ID and content hash, timestamps, case exposure role, and LangSmith root trace ID where applicable. Preserve Phase 1's `answered`, `unsupported`, and `error` outcomes as separate values; add a capability-gap classification and a short reason when the model explicitly cannot answer. Do not define or persist a second per-event trace schema.
@@ -25,4 +27,4 @@ The [LangSmith guide for OpenAI-compatible providers](https://docs.langchain.com
 - The supervisor can retrieve a trace by its Atlas reference; missing or redacted evidence is explicit. Secrets and protected answers do not appear in the trace, and a worker restart does not erase Atlas attempts.
 - A synthetic rejected attempt can be retrieved from Atlas by task family and linked to its LangSmith trace for the next proposal.
 
-**Phase deliverables:** `src/self_heal/{contracts,telemetry,storage,settings,cli}.py`, `tests/test_telemetry.py`, and the Atlas/LangSmith fields in `.env.example`.
+**Phase deliverables:** `src/self_heal/{contracts,telemetry,storage,execution,settings,cli}.py`, focused storage and telemetry tests, and the Atlas/LangSmith fields in `.env.example`.

@@ -2,14 +2,23 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Any, Callable, Iterable
 
 from evals.analyst.generator import MaterializedCase, PreparedCase, materialize_case
 from harness.agent import AnalystAgent, RunResult
 from harness.tools import AnalystTools
+from self_heal.contracts import (
+    build_eval_case_record,
+    build_evaluation_record,
+    new_trial_id,
+    stable_case_id,
+    utc_now,
+)
+from self_heal.execution import RunExecutor
 from self_heal.model import ChatModel
 from self_heal.settings import AnalystConfig
+from self_heal.storage import AtlasHistoryStore, HistoryError
 from self_heal.table_store import AtlasTableStore
 
 
@@ -33,6 +42,13 @@ class EvaluationTrial:
     elapsed_seconds: float
     table_pages: int
     table_bytes: int
+    run_id: str = ""
+    case_id: str | None = None
+    trace_id: str | None = None
+    trace_url: str | None = None
+    trace_status: str = "not_traced"
+    history_status: str = "not_recorded"
+    trial_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -41,18 +57,96 @@ class EvaluationTrial:
 class EvaluationRunner:
     """Runs fixed cases through a fresh scoped Atlas table session and retains every trial."""
 
-    def __init__(self, store: AtlasTableStore, config: AnalystConfig) -> None:
+    def __init__(
+        self,
+        store: AtlasTableStore,
+        config: AnalystConfig,
+        *,
+        executor: RunExecutor | None = None,
+        history: AtlasHistoryStore | None = None,
+    ) -> None:
         self.store = store
         self.config = config
+        self.executor = executor
+        self.history = history
         self.trials: list[EvaluationTrial] = []
 
     def run_case(self, case: PreparedCase, model: ChatModel) -> EvaluationTrial:
         materialized = materialize_case(self.store, case)
+        case_id = stable_case_id(
+            scenario_id=case.scenario.scenario_id,
+            dataset=materialized.dataset,
+            task=case.scenario.task,
+            oracle_version=self.config.evaluation.oracle_version,
+        )
+        history_status = "not_recorded"
+        if self.history is not None:
+            try:
+                self.history.record_eval_case(
+                    build_eval_case_record(
+                        case_id=case_id,
+                        scenario_id=case.scenario.scenario_id,
+                        dataset=materialized.dataset,
+                        task=case.scenario.task,
+                        expected_answer=case.expected_answer,
+                        oracle_version=self.config.evaluation.oracle_version,
+                        config=self.config,
+                        exposure_role="baseline",
+                        created_at=utc_now(),
+                    )
+                )
+                history_status = "recording"
+            except (HistoryError, OSError):
+                history_status = "incomplete"
         table = self.store.open_session(materialized.dataset.dataset_id)
-        agent = AnalystAgent(model, AnalystTools(table, self.config), self.config)
+        tools = AnalystTools(table, self.config)
         invocation: dict[str, Any] | str = case.scenario.question or case.scenario.task
-        result = agent.run(invocation)
-        trial = assess_run(materialized, result, self.config)
+        trace = None
+        if self.executor is not None:
+            execution = self.executor.run(
+                model=model,
+                tools=tools,
+                dataset=materialized.dataset,
+                invocation=invocation,
+                case_id=case_id,
+                case_exposure="baseline",
+            )
+            result = execution.result
+            trace = execution.trace
+            history_status = execution.history_status if history_status != "incomplete" else "incomplete"
+        else:
+            result = AnalystAgent(model, tools, self.config).run(invocation)
+        trial_id = new_trial_id()
+        trial = assess_run(
+            materialized,
+            result,
+            self.config,
+            case_id=case_id,
+            trace_id=trace.trace_id if trace is not None else None,
+            trace_url=trace.url if trace is not None else None,
+            trace_status=trace.status if trace is not None else "not_traced",
+            history_status=history_status,
+            trial_id=trial_id,
+        )
+        if self.history is not None:
+            try:
+                self.history.record_evaluation(
+                    build_evaluation_record(
+                        evaluation_id=trial_id,
+                        case_id=case_id,
+                        result=result,
+                        passed=trial.passed,
+                        violation=trial.violation,
+                        dataset=materialized.dataset,
+                        trace=trace,
+                        config=self.config,
+                        created_at=utc_now(),
+                    )
+                )
+                if history_status == "recording":
+                    trial = replace(trial, history_status="recorded")
+            except (HistoryError, OSError):
+                trial = replace(trial, history_status="incomplete")
         self.trials.append(trial)
         return trial
 
@@ -64,7 +158,18 @@ class EvaluationRunner:
         return tuple(self.run_case(case, model_factory()) for case in cases)
 
 
-def assess_run(materialized: MaterializedCase, result: RunResult, config: AnalystConfig) -> EvaluationTrial:
+def assess_run(
+    materialized: MaterializedCase,
+    result: RunResult,
+    config: AnalystConfig,
+    *,
+    case_id: str | None = None,
+    trace_id: str | None = None,
+    trace_url: str | None = None,
+    trace_status: str = "not_traced",
+    history_status: str = "not_recorded",
+    trial_id: str | None = None,
+) -> EvaluationTrial:
     """Grade a harness result outside the editable harness boundary."""
     violation = _resource_violation(result, config)
     if violation is None:
@@ -95,6 +200,13 @@ def assess_run(materialized: MaterializedCase, result: RunResult, config: Analys
         elapsed_seconds=result.elapsed_seconds,
         table_pages=result.table_pages,
         table_bytes=result.table_bytes,
+        run_id=result.run_id,
+        case_id=case_id,
+        trace_id=trace_id,
+        trace_url=trace_url,
+        trace_status=trace_status,
+        history_status=history_status,
+        trial_id=trial_id,
     )
 
 

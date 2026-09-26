@@ -20,7 +20,9 @@ class AgentFailure(ValueError):
 
 
 class UnsupportedQuestion(AgentFailure):
-    pass
+    """A natural-language request that is outside the current task contract."""
+
+    limitation_kind = "capability_gap"
 
 
 @dataclass(frozen=True)
@@ -36,6 +38,8 @@ class RunResult:
     elapsed_seconds: float
     table_pages: int
     table_bytes: int
+    limitation_kind: str | None = None
+    limitation_reason: str | None = None
 
 
 def validate_task(task: dict[str, Any], config: AnalystConfig) -> None:
@@ -127,13 +131,15 @@ class AnalystAgent:
         self.tools = tools
         self.config = config
 
-    def run(self, task: dict[str, Any] | str) -> RunResult:
-        run_id = str(uuid.uuid4())
+    def run(self, task: dict[str, Any] | str, *, run_id: str | None = None) -> RunResult:
+        run_id = run_id or str(uuid.uuid4())
         started = time.monotonic()
         model_calls = tool_calls = total_tokens = 0
         answer: dict[str, Any] | None = None
         error: str | None = None
         unsupported = False
+        limitation_kind: str | None = None
+        limitation_reason: str | None = None
         interpreted_task: dict[str, Any] | None = None
         rounds: list[list[dict[str, Any]]] = []
         try:
@@ -196,8 +202,10 @@ class AnalystAgent:
                 rounds.append(exchange)
             else:
                 raise AgentFailure("Model-call budget exceeded before a final answer")
-        except UnsupportedQuestion:
+        except UnsupportedQuestion as exc:
             unsupported = True
+            limitation_kind = exc.limitation_kind
+            limitation_reason = str(exc)
         except AgentFailure as exc:
             error = str(exc)
         except Exception as exc:  # Provider errors should not leak request headers or secrets.
@@ -215,4 +223,6 @@ class AnalystAgent:
             elapsed_seconds=round(time.monotonic() - started, 3),
             table_pages=self.tools.table.pages_read,
             table_bytes=self.tools.table.bytes_read,
+            limitation_kind=limitation_kind,
+            limitation_reason=limitation_reason,
         )

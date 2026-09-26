@@ -1,0 +1,19 @@
+#!/bin/zsh
+# Launch the official MongoDB MCP server with this project's Atlas connection.
+#
+# `uv` reads .env only when this process starts. The connection string is never
+# written to Codex's MCP configuration or passed on the command line.
+
+set -euo pipefail
+
+project_root=${0:A:h:h}
+
+exec uv --directory "$project_root" run --locked --no-sync \
+  --env-file "$project_root/.env" -- /bin/zsh -fc '
+    export MDB_MCP_CONNECTION_STRING="${ATLAS_URI:?ATLAS_URI must be set}"
+    export MDB_MCP_READ_ONLY=true
+    exec docker run --rm --interactive \
+      --env MDB_MCP_CONNECTION_STRING \
+      --env MDB_MCP_READ_ONLY \
+      mongodb/mongodb-mcp-server:3.0.4
+  '

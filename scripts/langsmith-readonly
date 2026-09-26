@@ -1,0 +1,47 @@
+#!/bin/zsh
+# Query the project's LangSmith workspace without putting its API key in shell
+# history, Codex configuration, or command-line arguments.
+
+set -euo pipefail
+
+project_root=${0:A:h:h}
+project_name=self-heal
+
+usage() {
+  print -u2 "Usage: $0 {projects|traces [limit]|runs [limit]|trace <trace-id>}"
+  exit 64
+}
+
+limit() {
+  local value=${1:-10}
+  if [[ ! $value =~ '^[1-9][0-9]*$' ]] || (( value > 50 )); then
+    print -u2 "limit must be an integer from 1 through 50"
+    exit 64
+  fi
+  print -r -- "$value"
+}
+
+case ${1:-} in
+  projects)
+    (( $# == 1 )) || usage
+    set -- langsmith --format json project list
+    ;;
+  traces)
+    (( $# <= 2 )) || usage
+    set -- langsmith --format json trace list --project "$project_name" --limit "$(limit "${2:-10}")"
+    ;;
+  runs)
+    (( $# <= 2 )) || usage
+    set -- langsmith --format json run list --project "$project_name" --limit "$(limit "${2:-10}")"
+    ;;
+  trace)
+    (( $# == 2 )) || usage
+    set -- langsmith --format json trace get "$2" --project "$project_name"
+    ;;
+  *)
+    usage
+    ;;
+esac
+
+exec uv --directory "$project_root" run --locked --no-sync \
+  --env-file "$project_root/.env" -- "$@"

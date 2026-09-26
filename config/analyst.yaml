@@ -1,4 +1,6 @@
 task_contract:
+  version: inventory-totals-v1
+  family: inventory-totals
   metrics: [on_hand, reserved, available]
   filter_fields: [sku, warehouse, category]
   group_fields: [warehouse, category]

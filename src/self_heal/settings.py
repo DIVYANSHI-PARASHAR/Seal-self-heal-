@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,6 +37,10 @@ class EvaluationConfig:
 
 @dataclass(frozen=True)
 class AnalystConfig:
+    task_contract_version: str
+    task_family: str
+    config_hash: str
+    contract_hash: str
     metrics: tuple[str, ...]
     filter_fields: tuple[str, ...]
     group_fields: tuple[str, ...]
@@ -44,8 +49,19 @@ class AnalystConfig:
     evaluation: EvaluationConfig
 
 
+@dataclass(frozen=True)
+class LangSmithConfig:
+    """Configuration for the trusted LangSmith supervisor adapter."""
+
+    enabled: bool
+    api_key: str | None
+    project: str
+    workspace_id: str | None
+
+
 def load_config(path: Path = DEFAULT_CONFIG) -> AnalystConfig:
-    raw: dict[str, Any] = yaml.safe_load(path.read_text(encoding="utf-8"))
+    raw_bytes = path.read_bytes()
+    raw: dict[str, Any] = yaml.safe_load(raw_bytes.decode("utf-8"))
     limits = Limits(**raw["limits"])
     if any(value <= 0 for value in vars(limits).values()):
         raise ValueError("All analyst limits must be positive")
@@ -53,6 +69,10 @@ def load_config(path: Path = DEFAULT_CONFIG) -> AnalystConfig:
     if not schema or any(kind not in {"string", "integer"} for kind in schema.values()):
         raise ValueError("Unsupported table schema")
     contract = raw["task_contract"]
+    version = contract.get("version")
+    family = contract.get("family")
+    if not isinstance(version, str) or not version or not isinstance(family, str) or not family:
+        raise ValueError("Task contract version and family must be configured")
     filters = tuple(contract["filter_fields"])
     groups = tuple(contract["group_fields"])
     if not set(filters + groups).issubset(schema):
@@ -72,6 +92,12 @@ def load_config(path: Path = DEFAULT_CONFIG) -> AnalystConfig:
     ):
         raise ValueError("Invalid evaluation configuration")
     return AnalystConfig(
+        task_contract_version=version,
+        task_family=family,
+        config_hash=hashlib.sha256(raw_bytes).hexdigest(),
+        contract_hash=hashlib.sha256(
+            yaml.safe_dump(contract, sort_keys=True, allow_unicode=True).encode("utf-8")
+        ).hexdigest(),
         metrics=tuple(contract["metrics"]),
         filter_fields=filters,
         group_fields=groups,
@@ -95,3 +121,22 @@ def agent_model_config() -> tuple[str, str]:
     if not key or not model:
         raise ValueError("OPENROUTER_API_KEY and OPENROUTER_AGENT_MODEL must be set")
     return key, model
+
+
+def langsmith_config() -> LangSmithConfig:
+    """Read optional tracing settings without making ordinary agent runs depend on them."""
+
+    raw_enabled = os.environ.get("LANGSMITH_TRACING", "false").strip().lower()
+    if raw_enabled in {"1", "true", "yes", "on"}:
+        enabled = True
+    elif raw_enabled in {"", "0", "false", "no", "off"}:
+        enabled = False
+    else:
+        raise ValueError("LANGSMITH_TRACING must be true or false")
+    project = os.environ.get("LANGSMITH_PROJECT", "self-heal").strip() or "self-heal"
+    return LangSmithConfig(
+        enabled=enabled,
+        api_key=os.environ.get("LANGSMITH_API_KEY") or None,
+        project=project,
+        workspace_id=os.environ.get("LANGSMITH_WORKSPACE_ID") or None,
+    )

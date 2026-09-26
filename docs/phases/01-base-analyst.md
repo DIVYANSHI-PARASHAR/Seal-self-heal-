@@ -19,7 +19,7 @@ Copy `.env.example` to `.env`. Supply `ATLAS_URI` and `ATLAS_DATABASE` to seed a
 
 - The small dataset is materialized in Atlas with the expected row count and content hash; the agent answers natural-language East and West questions by interpreting each into the supported task contract, reading through the scoped table interface, and producing the correct structured answer. Both scripted model checks and live smoke runs cover this path.
 - The tool loop exposes only registered tools, obeys the configured step limit, and reports a clear failure when it cannot complete.
-- An unsupported natural-language request exits normally with no table read and is distinguishable from a model-format, provider, budget, or tool failure. Phase 3 will persist and trace this outcome; Phase 1 only returns it in the run result.
+- An unsupported natural-language request exits normally with no table read and is distinguishable from a model-format, provider, budget, or tool failure. Phase 3 persists and traces this outcome; Phase 1 defines the returned run result.
 - A request for another dataset or collection, an oversized page, or an unbounded query is rejected by the trusted table interface. Source and data are independent of any future generated improvement; there is no prewritten aggregation tool to select.
 
 **Phase deliverables:** `pyproject.toml`, `harness/{agent,tools,context}.py`, `config/analyst.yaml`, `src/self_heal/{cli,model,settings,table_store}.py`, a small inventory dataset definition whose rows are materialized in Atlas, and a bulk grouping task definition under `evals/analyst/data/` for Phase 2.

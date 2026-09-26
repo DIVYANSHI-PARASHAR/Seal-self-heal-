@@ -31,12 +31,24 @@ class OpenRouterModel:
 
     def __init__(self, api_key: str, model: str, *, timeout_seconds: float = 45) -> None:
         self.model = model
+        self.timeout_seconds = timeout_seconds
         self.client = OpenAI(
             base_url="https://openrouter.ai/api/v1",
             api_key=api_key,
             timeout=timeout_seconds,
             max_retries=0,
         )
+
+    @property
+    def tracing_settings(self) -> dict[str, Any]:
+        """Stable, non-secret settings recorded with supervisor-owned run evidence."""
+
+        return {
+            "temperature": 0,
+            "tool_choice": "auto",
+            "parallel_tool_calls": False,
+            "timeout_seconds": getattr(self, "timeout_seconds", None),
+        }
 
     def complete(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> ModelReply:
         request: dict[str, Any] = {"model": self.model, "messages": messages, "temperature": 0}
