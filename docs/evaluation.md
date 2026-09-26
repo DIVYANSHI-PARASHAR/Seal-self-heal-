@@ -2,7 +2,7 @@
 
 Self-Heal turns observed limitations into persistent eval cases, then accepts harness changes only when independent checks support them. The first domain is structured table analysis with a fixed contract for filters, grouping, and numeric aggregates.
 
-**Preparation status:** this document defines the intended evaluation design. The generator, oracle, runner, acceptance gates, and live comparisons are not implemented in this repository yet.
+**Implementation status:** Phase 1 supplies immutable Atlas datasets and bounded table access. The protected generator, oracle, evaluation runner, acceptance gates, and comparative trials remain planned for Phases 2–6.
 
 ## Creating an eval from an observation
 

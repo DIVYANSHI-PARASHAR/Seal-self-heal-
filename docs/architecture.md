@@ -2,7 +2,7 @@
 
 Self-Heal is one local application containing a custom analyst harness and a trusted supervisor. The harness evolves in response to task evidence; the supervisor runs separately so it can evaluate and start a new version without modifying an in-flight process.
 
-**Preparation status:** this document describes the intended components and boundaries. They are not implemented in this repository yet.
+**Implementation status:** Phase 1 provides the Atlas table store, scoped table interface, OpenRouter model client, three-tool harness, and local runner. The protected evaluator, LangSmith adapter, evolution supervisor, and Docker boundary remain planned for later phases.
 
 ## Components
 

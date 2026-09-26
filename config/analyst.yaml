@@ -1,0 +1,31 @@
+task_contract:
+  metrics: [on_hand, reserved, available]
+  filter_fields: [sku, warehouse, category]
+  group_fields: [warehouse, category]
+  output:
+    scalar: {value: integer}
+    grouped: {groups: mapping_of_integer_totals}
+    group_order: alphabetical
+  invalid_rows: reject_dataset
+  missing_values: reject_dataset
+  numeric_values: nonnegative_integers
+
+table_schema:
+  sku: string
+  warehouse: string
+  category: string
+  on_hand: integer
+  reserved: integer
+
+limits:
+  max_model_calls: 8
+  max_tool_calls: 12
+  max_elapsed_seconds: 90
+  max_total_tokens: 30000
+  max_page_size: 4
+  max_pages: 256
+  max_bytes: 1000000
+  max_calculator_operands: 32
+  context_rounds: 5
+
+editable_paths: [harness/]

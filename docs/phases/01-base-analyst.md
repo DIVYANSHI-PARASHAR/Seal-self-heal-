@@ -21,4 +21,4 @@ Copy `.env.example` to `.env`. Supply `ATLAS_URI` and `ATLAS_DATABASE` to seed a
 - The tool loop exposes only registered tools, obeys the configured step limit, and reports a clear failure when it cannot complete.
 - A request for another dataset or collection, an oversized page, or an unbounded query is rejected by the trusted table interface. Source and data are independent of any future generated improvement; there is no prewritten aggregation tool to select.
 
-**Phase deliverables:** `pyproject.toml`, `harness/{agent,tools,context}.py`, `config/analyst.yaml`, `src/self_heal/{cli,model,settings,table_store}.py`, and a first small inventory dataset definition under `evals/analyst/data/` whose rows are materialized in Atlas.
+**Phase deliverables:** `pyproject.toml`, `harness/{agent,tools,context}.py`, `config/analyst.yaml`, `src/self_heal/{cli,model,settings,table_store}.py`, a small inventory dataset definition whose rows are materialized in Atlas, and a bulk grouping task definition under `evals/analyst/data/` for Phase 2.
