@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pymongo import ASCENDING, DESCENDING
+from pymongo import ASCENDING, DESCENDING, ReturnDocument
 from pymongo.database import Database
 from pymongo.errors import DuplicateKeyError, PyMongoError
 
@@ -30,6 +30,9 @@ class AtlasHistoryStore:
         self.gaps = database["capability_gaps"]
         self.selection_plans = database["selection_plans"]
         self.final_assessments = database["final_assessments"]
+        self.harness_workflows = database["harness_workflows"]
+        self.evolution_jobs = database["evolution_jobs"]
+        self.evolution_events = database["evolution_events"]
 
     def ensure_indexes(self) -> None:
         """Create the Phase 3 query paths without a duplicate event collection."""
@@ -69,6 +72,14 @@ class AtlasHistoryStore:
         self.final_assessments.create_index([("case_id", ASCENDING)], unique=True)
         self.final_assessments.create_index([("dataset.id", ASCENDING)], unique=True)
         self.final_assessments.create_index([("commit", ASCENDING), ("started_at", DESCENDING)])
+        self.harness_workflows.create_index([("workflow_revision_id", ASCENDING)], unique=True)
+        self.harness_workflows.create_index([("identity_hash", ASCENDING)], unique=True)
+        self.harness_workflows.create_index([("task_family", ASCENDING), ("created_at", DESCENDING)])
+        self.harness_workflows.create_index([("source_commit", ASCENDING), ("configuration_hash", ASCENDING)])
+        self.evolution_jobs.create_index([("incident_run_id", ASCENDING)], unique=True)
+        self.evolution_jobs.create_index([("status", ASCENDING), ("updated_at", DESCENDING)])
+        self.evolution_events.create_index([("job_id", ASCENDING), ("sequence", ASCENDING)], unique=True)
+        self.evolution_events.create_index([("event_id", ASCENDING)], unique=True)
 
     def start_run(self, record: dict[str, Any]) -> None:
         self._require(record, "run_id", "_id")
@@ -95,6 +106,16 @@ class AtlasHistoryStore:
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         return self.runs.find_one({"_id": run_id})
+
+    def bind_run_workflow(self, run_id: str, workflow_revision_id: str) -> None:
+        """Bind a run once its immutable workflow has been captured."""
+
+        result = self.runs.update_one(
+            {"_id": run_id, "$or": [{"workflow_revision_id": {"$exists": False}}, {"workflow_revision_id": workflow_revision_id}]},
+            {"$set": {"workflow_revision_id": workflow_revision_id}},
+        )
+        if result.matched_count != 1:
+            raise HistoryError("Run is already bound to a different workflow")
 
     def recent_runs(self, *, limit: int = 20) -> list[dict[str, Any]]:
         """Return compact run history ordered newest-first for the local UI."""
@@ -180,10 +201,12 @@ class AtlasHistoryStore:
 
     def compare_and_swap_active(
         self, *, task_family: str, expected_parent: str, commit: str, evidence_id: str,
-        environment_hash: str, at: datetime
+        environment_hash: str, at: datetime, workflow_revision_id: str | None = None,
     ) -> bool:
         """Activate only the tested child of the current version."""
         patch = {"commit": commit, "evidence_id": evidence_id, "environment_hash": environment_hash, "updated_at": at}
+        if workflow_revision_id is not None:
+            patch["workflow_revision_id"] = workflow_revision_id
         try:
             current = self.active_versions.find_one({"_id": task_family})
             if current is None:
@@ -211,6 +234,117 @@ class AtlasHistoryStore:
         self._require(record, "version_id", "_id", "status", "created_at")
         record.setdefault("lifecycle", [{"state": record["status"], "at": record["created_at"]}])
         self._insert(self.versions, record, "version")
+
+    def record_workflow(self, record: dict[str, Any]) -> dict[str, Any]:
+        """Store a deduplicated, immutable graph snapshot."""
+
+        record = dict(record)
+        self._require(record, "_id", "workflow_revision_id", "identity_hash", "graph_hash", "graph", "created_at")
+        try:
+            existing = self.harness_workflows.find_one({"_id": record["_id"]})
+            if existing:
+                if existing.get("identity_hash") != record["identity_hash"] or existing.get("graph_hash") != record["graph_hash"]:
+                    raise HistoryError("Workflow identity conflicts with stored graph")
+                return existing
+            self.harness_workflows.insert_one(record)
+            return record
+        except DuplicateKeyError as exc:
+            existing = self.harness_workflows.find_one({"identity_hash": record["identity_hash"]})
+            if existing and existing.get("graph_hash") == record["graph_hash"]:
+                return existing
+            raise HistoryError("Workflow identity conflicts with stored graph") from exc
+        except PyMongoError as exc:
+            raise HistoryError("Could not record harness workflow") from exc
+
+    def get_workflow(self, workflow_revision_id: str) -> dict[str, Any] | None:
+        return self.harness_workflows.find_one({"_id": workflow_revision_id})
+
+    def workflows_for(self, task_family: str, *, limit: int = 50) -> list[dict[str, Any]]:
+        if not 1 <= limit <= 100:
+            raise ValueError("History limit must be between 1 and 100")
+        return list(self.harness_workflows.find({"task_family": task_family}).sort("created_at", DESCENDING).limit(limit))
+
+    def attach_candidate_workflow(self, candidate_id: str, *, workflow_revision_id: str,
+                                  parent_workflow_revision_id: str | None = None,
+                                  proposal: dict[str, Any] | None = None) -> None:
+        patch: dict[str, Any] = {"workflow_revision_id": workflow_revision_id}
+        if parent_workflow_revision_id is not None:
+            patch["parent_workflow_revision_id"] = parent_workflow_revision_id
+        if proposal is not None:
+            patch["workflow_proposal"] = proposal
+        result = self.candidates.update_one({"_id": candidate_id}, {"$set": patch})
+        if result.matched_count != 1:
+            raise HistoryError("Candidate is unavailable for workflow binding")
+
+    def create_evolution_job(self, record: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        """Create at most one durable job for an incident run."""
+
+        record = dict(record)
+        self._require(record, "_id", "job_id", "incident_run_id", "status", "created_at", "updated_at")
+        record.setdefault("next_event_sequence", 0)
+        record.setdefault("lifecycle", [{"state": record["status"], "at": record["created_at"]}])
+        try:
+            self.evolution_jobs.insert_one(record)
+            self.runs.update_one({"_id": record["incident_run_id"]}, {"$set": {"evolution_job_id": record["job_id"]}})
+            return record, True
+        except DuplicateKeyError:
+            existing = self.evolution_jobs.find_one({"incident_run_id": record["incident_run_id"]})
+            if existing:
+                return existing, False
+            raise HistoryError("Evolution job identity conflicts with stored job")
+        except PyMongoError as exc:
+            raise HistoryError("Could not create evolution job") from exc
+
+    def get_evolution_job(self, job_id: str) -> dict[str, Any] | None:
+        return self.evolution_jobs.find_one({"_id": job_id})
+
+    def append_evolution_event(self, job_id: str, *, stage: str, payload: dict[str, Any] | None, at: datetime) -> dict[str, Any]:
+        """Append ordered, replayable job progress after its underlying record exists."""
+
+        try:
+            updated = self.evolution_jobs.find_one_and_update(
+                {"_id": job_id},
+                {"$inc": {"next_event_sequence": 1}, "$set": {"updated_at": at}},
+                return_document=ReturnDocument.AFTER,
+            )
+            if updated is None:
+                raise HistoryError("Evolution job is unavailable")
+            sequence = updated["next_event_sequence"]
+            event = {"_id": f"{job_id}:{sequence}", "event_id": f"{job_id}:{sequence}", "job_id": job_id,
+                     "sequence": sequence, "stage": stage, "payload": dict(payload or {}), "created_at": at}
+            self.evolution_events.insert_one(event)
+            return event
+        except DuplicateKeyError as exc:
+            raise HistoryError("Evolution event identity conflicts") from exc
+        except PyMongoError as exc:
+            raise HistoryError("Could not append evolution event") from exc
+
+    def evolution_events_after(self, job_id: str, *, after: int = 0, limit: int = 100) -> list[dict[str, Any]]:
+        if after < 0 or not 1 <= limit <= 100:
+            raise ValueError("Evolution event cursor is invalid")
+        return list(self.evolution_events.find({"job_id": job_id, "sequence": {"$gt": after}}).sort("sequence", ASCENDING).limit(limit))
+
+    def update_evolution_job(self, job_id: str, *, status: str | None = None,
+                             patch: dict[str, Any] | None = None, at: datetime) -> None:
+        changes = dict(patch or {})
+        changes["updated_at"] = at
+        update: dict[str, Any] = {"$set": changes}
+        if status is not None:
+            changes["status"] = status
+            update["$push"] = {"lifecycle": {"state": status, "at": at}}
+        result = self.evolution_jobs.update_one({"_id": job_id}, update)
+        if result.matched_count != 1:
+            raise HistoryError("Evolution job is unavailable")
+
+    def claim_evolution_job(self, job_id: str, *, lease_owner: str, at: datetime) -> bool:
+        """Claim a queued job once; a restart can explicitly requeue interrupted work."""
+
+        result = self.evolution_jobs.update_one(
+            {"_id": job_id, "status": "queued"},
+            {"$set": {"status": "running", "lease_owner": lease_owner, "updated_at": at},
+             "$push": {"lifecycle": {"state": "running", "at": at}}},
+        )
+        return result.modified_count == 1
 
     def append_candidate_transition(
         self, candidate_id: str, *, status: str, at: datetime, reason: str | None = None

@@ -11,13 +11,16 @@ import pytest
 import mongomock
 
 from harness.tools import AnalystTools
+from harness.logistics import LogisticsTools
 from self_heal.model import ModelReply, ToolCall
 from self_heal.runner import CandidateRunner
 from self_heal.settings import LangSmithConfig, load_config
 from self_heal.table_store import AtlasTableStore
+from self_heal.logistics_store import LogisticsDatasetStore
 from self_heal.telemetry import LangSmithTelemetry
 from evals.analyst.generator import load_scenarios, prepare_case
 from self_heal.storage import AtlasHistoryStore
+from evals.logistics.generator import public_incident_bundle
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -69,6 +72,43 @@ def test_docker_bridge_counts_model_and_table_work_outside_candidate(monkeypatch
     assert result.tool_calls == 1
     assert result.table_pages == 1
     assert result.total_tokens == 40
+
+
+def test_docker_bridge_runs_pinned_logistics_agent_through_scoped_bundle(monkeypatch):
+    config = load_config(ROOT / "config" / "analyst.yaml")
+    database = mongomock.MongoClient()["test"]
+    inventory = AtlasTableStore(database, config)
+    logistics = LogisticsDatasetStore(database)
+    logistics.ensure_indexes()
+    dataset = logistics.materialize("logistics", **public_incident_bundle())
+    runner = CandidateRunner(
+        store=inventory, logistics=logistics, config=config, history=None,
+        telemetry=LangSmithTelemetry(LangSmithConfig(False, None, "test", None)),
+    )
+    original = subprocess.Popen
+
+    def local_container(command, **kwargs):
+        assert "--network" in command and command[command.index("--network") + 1] == "none"
+        assert "--read-only" in command and "--cap-drop" in command
+        assert all("ATLAS_URI" not in part for part in command)
+        return original(
+            [sys.executable, str(ROOT / "runner_support" / "container_main.py")],
+            cwd=ROOT, env={"PYTHONPATH": str(ROOT), "PYTHONDONTWRITEBYTECODE": "1"},
+            **kwargs,
+        )
+
+    monkeypatch.setattr("self_heal.runner.subprocess.Popen", local_container)
+    table = logistics.open_session(dataset.dataset_id)
+    question = "How many customers sent more than 15 shipments from warehouse 3 yesterday?"
+    result = runner._execute_container(
+        ROOT / "harness", question, "logistics-run", table, object(), LogisticsTools(table, config),
+        input_kind="logistics_bundle",
+    )
+    assert result.outcome == "answered", result.error
+    assert result.answer == {"value": 2}
+    assert result.model_calls == 0 and result.tool_calls == 1
+    assert result.table_pages > 1
+    assert table.completed_shipment_scan(3, "yesterday")
 
 
 def test_container_receives_only_controlled_imports():

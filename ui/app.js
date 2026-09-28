@@ -12,6 +12,7 @@ const logisticsExamples = ["How many customers sent more than 15 shipments from 
 let examples = logisticsExamples, datasets = [], selectedSource = null, serviceReady = false, healthData = null;
 let activeSuggestion = -1, visibleSuggestions = [], selectedRun = null, currentPage = 0;
 let activeTab = "atlas";
+let selectedEvolutionId = null, evolutionCursor = 0, evolutionTimer = null, harnessWorkflows = [];
 function el(tag, className, content) {
   const node = document.createElement(tag);
   if(className) node.className = className;
@@ -267,17 +268,73 @@ function renderTimeline(run){
   const link=$("[data-trace-link]"), side=$("[data-trace-side-link]");side.hidden=link.hidden;
   if(!link.hidden)side.href=link.href;else side.removeAttribute("href");
 }
+function svgNode(tag){return document.createElementNS("http://www.w3.org/2000/svg",tag);}
+function componentInspector(node, graph, root){
+  root.replaceChildren();
+  if(!node){root.append(el("p","empty-state","Select a workflow component to inspect it."));return;}
+  root.append(el("div","inspector-kind",(node.kind || "component").replaceAll("_"," ")),el("h3","",node.label),el("p","muted",node.summary || "No saved summary."));
+  const incoming=(graph.edges || []).filter(edge=>edge.target===node.id), outgoing=(graph.edges || []).filter(edge=>edge.source===node.id);
+  const list=el("dl","component-facts");[["ID",node.id],["Group",node.group || "—"],["Inputs",incoming.length],["Outputs",outgoing.length]].forEach(([term,value])=>{list.append(el("dt","",term),el("dd","",value));});root.append(list);
+  if(node.source && node.source.length){const sources=el("div","component-sources");sources.append(el("strong","","Source"));node.source.forEach(item=>sources.append(el("span","",item.path)));root.append(sources);}
+  if(node.kind==="tool_group")root.append(el("p","muted","Tools are nested under the owning agent. Their availability is structural; recorded use is shown only in linked run evidence."));
+}
+function workflowWithProposal(graph, proposal){
+  if(!graph || !proposal || !Array.isArray(proposal.additions) || !proposal.additions.length)return graph;
+  const next={...graph,nodes:[...(graph.nodes || [])],edges:[...(graph.edges || [])],metadata:{...(graph.metadata || {})}};
+  const agent=next.nodes.find(node=>node.kind==="agent");
+  proposal.additions.forEach((item,index)=>{
+    const id=item.id, node={...item,summary:"Proposed tool. It is not executable until screened and committed.",layout:{x:545,y:380+index*78},fingerprint:id,source:[]};
+    next.nodes.push(node);if(agent)next.edges.push({id:agent.id+">proposes>"+id,source:agent.id,target:id,relation:"proposes",label:"proposes"});
+  });
+  return next;
+}
+function renderWorkflow(graph, canvas, listRoot, inspector, proposal){
+  canvas.replaceChildren();listRoot.replaceChildren();
+  const view=workflowWithProposal(graph,proposal);
+  if(!view || !Array.isArray(view.nodes) || !view.nodes.length){canvas.append(el("p","empty-state","No saved workflow is available for this version."));listRoot.append(el("p","empty-state","Workflow metadata has not been captured."));return;}
+  const svg=svgNode("svg");svg.setAttribute("viewBox","0 0 1100 560");svg.setAttribute("role","img");svg.setAttribute("aria-label","Harness workflow diagram");svg.classList.add("workflow-svg");
+  const byId=new Map(view.nodes.map(node=>[node.id,node]));
+  (view.edges || []).forEach(edge=>{const a=byId.get(edge.source),b=byId.get(edge.target);if(!a||!b)return;const line=svgNode("line"),pa=a.layout||{},pb=b.layout||{};line.setAttribute("x1",(pa.x||0)+116);line.setAttribute("y1",(pa.y||0)+28);line.setAttribute("x2",pb.x||0);line.setAttribute("y2",(pb.y||0)+28);line.setAttribute("class","workflow-edge "+(edge.relation||""));svg.append(line);});
+  view.nodes.forEach(node=>{const point=node.layout||{},group=svgNode("g"),rect=svgNode("rect"),title=svgNode("text"),subtitle=svgNode("text");group.setAttribute("transform",`translate(${point.x||0} ${point.y||0})`);group.setAttribute("tabindex","0");group.setAttribute("role","button");group.setAttribute("aria-label","Inspect "+node.label);group.setAttribute("class","workflow-node "+(node.kind||"")+" "+(node.status||""));rect.setAttribute("width","164");rect.setAttribute("height","58");rect.setAttribute("rx","8");title.setAttribute("x","12");title.setAttribute("y","24");title.textContent=node.label;subtitle.setAttribute("x","12");subtitle.setAttribute("y","43");subtitle.textContent=(node.kind||"component").replaceAll("_"," ");group.append(rect,title,subtitle);const inspect=()=>componentInspector(node,view,inspector);group.addEventListener("click",inspect);group.addEventListener("keydown",event=>{if(event.key==="Enter"||event.key===" "){event.preventDefault();inspect();}});svg.append(group);});
+  canvas.append(svg);if(!(view.metadata?.runtime_mcp_servers||[]).length)listRoot.append(el("p","workflow-note","No runtime MCP servers are configured for this harness."));const list=el("ul","workflow-accessible-list");view.nodes.forEach(node=>{const button=el("button","",node.label+" · "+(node.kind||"component").replaceAll("_"," "));button.type="button";button.addEventListener("click",()=>componentInspector(node,view,inspector));const item=el("li");item.append(button);list.append(item);});listRoot.append(list);
+}
+function stageLabel(stage){return ({incident_classified:"Incident recorded",workflow_snapshot_ready:"Workflow saved",diagnosing:"Diagnosing",trace_read:"Trace read",cases_frozen:"Cases frozen",baseline_reproduced:"Baseline reproduced",proposal_received:"Tool proposal received",candidate_ready:"Candidate ready",evaluating:"Evaluation running",selection_decided:"Selection decided",promotion_completed:"Promotion completed",activated:"Activated",rejected:"Rejected",needs_contract:"Needs contract",blocked:"Blocked",operational_error:"Operational error",rerun_completed:"Rerun completed"})[stage] || stage || "Waiting";}
+function evolutionStage(job){return job.stage || job.status || "incident_classified";}
+function markStages(stage){const order=["incident_classified","diagnosing","proposal_received","candidate_ready","evaluating","activated"],index=Math.max(0,order.indexOf(stage));document.querySelectorAll("[data-evolve-stages] li").forEach((item,i)=>{item.classList.toggle("complete",i<index);item.classList.toggle("current",item.dataset.stage===stage || (stage==="selection_decided"&&item.dataset.stage==="evaluating") || (stage==="promotion_completed"&&item.dataset.stage==="activated"));});}
+function formatResource(resources){if(!resources)return "—";return `${resources.elapsed_seconds ?? "—"} s · ${resources.total_tokens ?? 0} tokens · ${resources.table_pages ?? 0} pages`;}
+function renderComparison(data){
+  const root=$("[data-evolve-chart]"), trials=$("[data-evolve-trials]");root.replaceChildren();trials.replaceChildren();const groups=data.groups || [];
+  if(!groups.length){root.append(el("p","empty-state","Trials will appear here after the frozen evaluation plan is recorded."));}else{const roles=[...new Set(groups.map(item=>item.role))];roles.forEach(role=>{const group=el("div","comparison-group"),heading=el("div","comparison-heading",role.replaceAll("_"," "));group.append(heading);["baseline","candidate"].forEach(version=>{const item=groups.find(entry=>entry.role===role&&entry.version===version)||{expected:(data.scheduled?.[version]?.[role]||0),completed:0,passed:0,failed:0,pending:0,metrics:{}};const row=el("div","comparison-row"),label=el("span","",version==="baseline"?"Previous":"Updated"),track=el("div","comparison-track"),bar=el("span","comparison-bar "+version),text=el("span","",`${item.passed}/${item.expected} passed · ${item.pending||0} pending`);bar.style.width=`${item.expected?Math.min(100,100*item.completed/item.expected):0}%`;track.append(bar);row.append(label,track,text);group.append(row);});root.append(group);});}
+  (data.trials || []).slice().reverse().forEach(item=>{const row=el("tr"),status=item.passed?"Passed":"Failed",trace=el("td","",item.trace_id||"—");[item.case_label||"Protected case",item.version==="baseline"?"Previous":"Updated"].forEach(value=>row.append(el("td","",value)));row.append(el("td",item.passed?"pass":"fail",status),el("td","",formatResource(item.resources)),trace);trials.append(row);});
+  set("[data-evolve-evaluation-status]",data.plan_id ? "Frozen plan · "+data.watermark+" trials" : "Pending plan");
+}
+function renderEvolutionEvents(events){const root=$("[data-evolve-events]");root.replaceChildren();if(!events.length){root.append(el("p","empty-state","No persisted progress events yet."));return;}events.slice().reverse().forEach(event=>{const row=el("div","event-row"),left=el("div","",null);left.append(el("strong","",stageLabel(event.stage)),el("p","muted",date(event.created_at)));const payload=event.payload||{},detail=payload.reason||payload.hypothesis||payload.changed_mechanism||payload.candidate_commit||"";row.append(left,el("span","event-detail",detail));root.append(row);});}
+async function loadEvolve(jobId, poll=false){
+  if(!jobId){const data=await request("/api/runs?limit=100");const candidate=(data.runs||[]).find(run=>run.evolution_job_id);if(!candidate){set("[data-evolve-subtitle]","Submit a capability-gap question to start an evolution job.");return;}jobId=candidate.evolution_job_id;location.hash="#evolve/"+jobId;return;}
+  if(selectedEvolutionId!==jobId){selectedEvolutionId=jobId;evolutionCursor=0;}
+  try{const job=await request("/api/evolution-jobs/"+encodeURIComponent(jobId));set("[data-evolve-status]",stageLabel(evolutionStage(job)));set("[data-evolve-subtitle]",job.reason||"The saved incident workflow remains available while this job progresses.");set("[data-evolve-workflow-version]",job.workflow_revision_id ? job.workflow_revision_id.slice(0,18)+"…" : "Workflow pending");set("[data-evolve-updated]",date(job.updated_at));markStages(evolutionStage(job));const candidate=job.candidate||{};const workflowId=candidate.workflow_revision_id||job.workflow_revision_id;let workflow=null;if(workflowId)workflow=await request("/api/harness-workflows/"+encodeURIComponent(workflowId));renderWorkflow(workflow?.graph,$("[data-evolve-workflow]"),$("[data-evolve-workflow-list]"),$("[data-evolve-inspector]"),candidate.workflow_revision_id?null:candidate.workflow_proposal||job.proposal);if(candidate.hypothesis){const inspector=$("[data-evolve-inspector]");inspector.prepend(el("p","proposal-note",candidate.hypothesis));}
+    const [events,evaluations]=await Promise.all([request("/api/evolution-jobs/"+encodeURIComponent(jobId)+"/events?after=0&limit=100"),request("/api/evolution-jobs/"+encodeURIComponent(jobId)+"/evaluations?limit=100")]);evolutionCursor=events.next_cursor||0;renderEvolutionEvents(events.events||[]);renderComparison(evaluations);
+    if(["queued","running"].includes(job.status)&&location.hash==="#evolve/"+jobId){clearTimeout(evolutionTimer);evolutionTimer=setTimeout(()=>loadEvolve(jobId,true),2000);}else clearTimeout(evolutionTimer);
+  }catch(error){set("[data-evolve-subtitle]",error.message);clearTimeout(evolutionTimer);}
+}
+async function loadHarness(revisionId){
+  const family=$("[data-harness-family]").value;const history=$("[data-workflow-history]");history.replaceChildren(el("p","muted","Loading workflows…"));try{const data=await request("/api/harness-workflows?limit=50&task_family="+encodeURIComponent(family));harnessWorkflows=data.workflows||[];history.replaceChildren();if(!harnessWorkflows.length){history.append(el("p","empty-state","No workflow snapshot has been saved for this harness yet."));renderWorkflow(null,$("[data-harness-workflow]"),$("[data-harness-workflow-list]"),$("[data-harness-inspector]"));return;}const chosen=revisionId||data.active_workflow_revision_id||harnessWorkflows[0].workflow_revision_id;harnessWorkflows.forEach(item=>{const button=el("button","workflow-history-row"),isCurrent=item.workflow_revision_id===chosen;button.type="button";button.classList.toggle("selected",isCurrent);button.append(el("strong","",item.source_commit?.slice(0,12)||item.workflow_revision_id.slice(0,12)),el("span","",date(item.created_at)),el("span","",item.node_count+" components"));button.addEventListener("click",()=>{location.hash="#harness/"+item.workflow_revision_id;});history.append(button);});const workflow=await request("/api/harness-workflows/"+encodeURIComponent(chosen));set("[data-harness-workflow-version]",workflow.source_commit?.slice(0,18)||chosen);renderWorkflow(workflow.graph,$("[data-harness-workflow]"),$("[data-harness-workflow-list]"),$("[data-harness-inspector]"));}catch(error){history.replaceChildren(el("p","empty-state",error.message));}}
 function showPage(page){
-  const selected=["ask","runs","run-details","evaluations","versions"].includes(page) ? page : "ask";
+  const [raw,id] = String(page||"").split("/");const selected=["ask","runs","run-details","evaluations","versions","evolve","harness"].includes(raw) ? raw : "ask";
   $("#ask").hidden=false;
   $("#run-details").hidden=selected!=="run-details" || !selectedRun;
   $("#runs").hidden=selected!=="runs" && selected!=="ask";
   $("#evaluations").hidden=selected!=="evaluations";
   $("#versions").hidden=selected!=="versions";
+  $("#evolve").hidden=selected!=="evolve";
+  $("#harness").hidden=selected!=="harness";
   $("#ask").classList.toggle("compact",selected!=="ask");
   document.querySelectorAll("[data-nav]").forEach(link=>link.classList.toggle("selected",link.dataset.nav===(selected==="run-details" ? "runs" : selected)));
   if(selected==="evaluations")loadEvaluations();
   if(selected==="versions")loadVersions();
+  if(selected==="evolve")loadEvolve(id);
+  if(selected==="harness")loadHarness(id);
+  if(selected!=="evolve")clearTimeout(evolutionTimer);
   window.scrollTo({top:0,behavior:"instant"});
 }
 async function loadEvaluations(){
@@ -359,11 +416,12 @@ $("#analysis-form").addEventListener("submit",async event=>{
     const run=await request("/api/runs",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({question:question.value,input_kind:selectedSource.input_kind,dataset_id:selectedSource.id})});
     const full=await request("/api/runs/"+encodeURIComponent(run.run_id)).catch(()=>run);
     renderRun(full);loadHistory();
-    location.hash="run-details";
+    location.hash=run.evolution_job_id ? "evolve/"+run.evolution_job_id : "run-details";
   }catch(error){question.setCustomValidity(error.message);question.reportValidity();announce(error.message);}
   finally{updateRunButton();runButton.removeAttribute("aria-busy");runButton.innerHTML=original;}
 });
 $("[data-copy-run-id]").addEventListener("click",async()=>{if(!selectedRun)return;try{await navigator.clipboard.writeText(selectedRun.run_id);announce("Run ID copied");}catch{announce("Could not copy run ID");}});
+$("[data-harness-family]").addEventListener("change",()=>loadHarness());
 request("/api/health").then(data=>{
   healthData=data;
   if(!data.logistics_active_version){

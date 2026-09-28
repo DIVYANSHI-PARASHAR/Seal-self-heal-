@@ -339,6 +339,25 @@ def _run_ui_command(
 
     api_key, model_id = agent_model_config()
     tracing = langsmith_config()
+    try:
+        evolution_key, evolution_id = evolution_model_config()
+    except ValueError:
+        evolution_key = evolution_id = None
+
+    def evolution_controller_factory(on_progress):
+        if not evolution_key or not evolution_id:
+            raise RuntimeError("OPENROUTER_EVOLUTION_MODEL is not configured")
+        job_telemetry = LangSmithTelemetry(tracing)
+        return EvolutionController(
+            store=store, history=history, config=config, telemetry=job_telemetry,
+            repository=CandidateRepository(Path.cwd()),
+            runner=CandidateRunner(store=store, logistics=logistics, config=config, history=history, telemetry=job_telemetry,
+                                   image=os.environ.get("SELF_HEAL_RUNNER_IMAGE", "self-heal-runner:local")),
+            model_factory=lambda: OpenRouterModel(api_key, model_id),
+            evolution_model=OpenRouterModel(evolution_key, evolution_id, timeout_seconds=120),
+            on_progress=on_progress,
+        )
+
     application = WebApplication(
         store=store,
         history=history,
@@ -347,6 +366,7 @@ def _run_ui_command(
         model_factory=lambda: OpenRouterModel(api_key, model_id),
         tracing=tracing,
         logistics=logistics,
+        evolution_controller_factory=evolution_controller_factory if evolution_key else None,
     )
     server = create_server(application, host=args.host, port=args.port)
     address, port = server.server_address[:2]

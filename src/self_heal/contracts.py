@@ -239,13 +239,14 @@ def build_run_start_record(
     case_exposure: str | None = None,
     source_commit: str | None = None,
     runner_image_digest: str | None = None,
+    workflow_revision_id: str | None = None,
 ) -> dict[str, Any]:
     execution = execution_identity(config, model)
     if source_commit is not None:
         execution["source"] = {"commit": source_commit, "dirty": False, "dirty_patch_hash": None}
     if runner_image_digest is not None:
         execution["runtime"] = {"isolation": "docker", "image_digest": runner_image_digest}
-    return {
+    record = {
         "_id": run_id,
         "run_id": run_id,
         "schema_version": SCHEMA_VERSION,
@@ -257,6 +258,9 @@ def build_run_start_record(
         "execution": execution,
         "lifecycle": [{"state": "started", "at": started_at}],
     }
+    if workflow_revision_id is not None:
+        record["workflow_revision_id"] = workflow_revision_id
+    return record
 
 
 def resource_summary(result: RunResult) -> dict[str, Any]:

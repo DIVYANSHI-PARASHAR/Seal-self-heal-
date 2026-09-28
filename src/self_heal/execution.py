@@ -59,6 +59,7 @@ class RunExecutor:
         invocation: dict[str, Any] | str,
         case_id: str | None = None,
         case_exposure: str | None = None,
+        workflow_revision_id: str | None = None,
         agent_factory: Callable[[ChatModel, Any, AnalystConfig], Any] = AnalystAgent,
     ) -> RunExecution:
         run_id = new_run_id()
@@ -78,6 +79,7 @@ class RunExecutor:
                         started_at=started_at,
                         case_id=case_id,
                         case_exposure=case_exposure,
+                        workflow_revision_id=workflow_revision_id,
                     )
                 )
                 history_started = True

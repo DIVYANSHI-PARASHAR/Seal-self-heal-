@@ -59,11 +59,17 @@ class EvolutionController:
         telemetry: LangSmithTelemetry, repository: CandidateRepository,
         runner: CandidateRunner, model_factory: Callable[[], ChatModel],
         evolution_model: ChatModel,
+        on_progress: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> None:
         self.store, self.history, self.config, self.telemetry = store, history, config, telemetry
         self.repository, self.runner = repository, runner
         self.model_factory, self.evolution_model = model_factory, evolution_model
         self.evaluator = SelectionEvaluator(runner, history, config)
+        self.on_progress = on_progress
+
+    def _progress(self, stage: str, **payload: Any) -> None:
+        if self.on_progress is not None:
+            self.on_progress(stage, payload)
 
     def evolve(self, run_id: str) -> dict[str, Any]:
         observed = self.history.get_run(run_id)
@@ -99,6 +105,7 @@ class EvolutionController:
                 "trace_id": (observed.get("trace") or {}).get("root_id"),
                 "created_at": utc_now(),
             })
+        self._progress("incident_classified", run_id=run_id, baseline_commit=baseline_commit)
         try:
             return self._evolve_observation(run_id, observed, invocation, dataset, baseline_commit,
                                             first_attempt=used_attempts + 1)
@@ -174,6 +181,9 @@ class EvolutionController:
             "changed_paths": candidate_source.changed_paths, "attempt": stored["attempt"],
             "created_at": utc_now(),
         })
+        self._progress("candidate_ready", candidate_id=fresh_id,
+                       candidate_commit=candidate_source.candidate_commit,
+                       parent_commit=baseline, candidate_source=str(candidate_source.worktree))
         return self._evaluate_candidate(
             run_id=run_id, candidate_id=fresh_id, baseline_commit=baseline,
             baseline_source=baseline_source, candidate_source=candidate_source,
@@ -189,6 +199,7 @@ class EvolutionController:
         if trace_record.get("status") != "available" or not trace_record.get("root_id"):
             raise EvolutionBlocked("Observed LangSmith trace is incomplete")
         trace = self.telemetry.read_redacted_trace(trace_record["root_id"])
+        self._progress("trace_read", run_id=run_id)
         if observed["outcome"] == "unsupported" and observed.get("limitation_kind") != "capability_gap":
             raise EvolutionBlocked("Refusal was not an explicit capability gap")
         if observed["outcome"] == "error" and "Model or runtime failure" in (observed.get("error") or ""):
@@ -244,6 +255,7 @@ class EvolutionController:
             invocation=scenario.question or scenario.task, task=scenario.task,
             role="generated_reproduction", origin="model_proposed_protected_oracle",
         )
+        self._progress("cases_frozen", original_case_id=original.case_id, generated_case_id=generated.case_id)
         for case in (original, generated):
             execution = self.runner.run(
                 source=baseline_source, source_commit=baseline_commit, dataset=case.dataset,
@@ -261,6 +273,7 @@ class EvolutionController:
                 raise EvolutionBlocked(f"Baseline failure did not reproduce on {case.role}")
             if self.config.evaluation.require_trace and execution.trace.status != "available":
                 raise EvolutionBlocked("Reproduction trace is incomplete")
+        self._progress("baseline_reproduced", original_case_id=original.case_id, generated_case_id=generated.case_id)
         regressions = self.evaluator.declared_regressions()
         validation = self.evaluator.private_validation_cases(original_task)
         negative = self.evaluator.negative_refusal(regressions[0].dataset if regressions else dataset)
@@ -281,6 +294,9 @@ class EvolutionController:
                     self.evolution_model, incident=incident, trace=trace, contract=contract,
                     source=source, reproduction=reproduction, previous_attempts=prior,
                 )
+                self._progress("proposal_received", candidate_id=candidate_id,
+                               changed_mechanism=proposal.changed_mechanism,
+                               hypothesis=proposal.hypothesis, diff=proposal.diff)
                 candidate_source = self.repository.apply_proposal(baseline_commit, proposal.diff)
                 self.repository.inspect(candidate_source)
             except (ProposalError, PatchRejected) as exc:
@@ -296,6 +312,7 @@ class EvolutionController:
                 })
                 prior.append({"hypothesis": proposal.hypothesis if proposal else "Proposal failed screening",
                               "status": "rejected", "reason": str(exc)})
+                self._progress("proposal_rejected", candidate_id=candidate_id, reason=str(exc))
                 continue
             if self.history.candidates.find_one({"candidate_commit": candidate_source.candidate_commit}):
                 reason = "Identical candidate commit was already evaluated"
@@ -309,6 +326,7 @@ class EvolutionController:
                     "created_at": utc_now(),
                 })
                 prior.append({"hypothesis": proposal.hypothesis, "status": "rejected", "reason": reason})
+                self._progress("proposal_rejected", candidate_id=candidate_id, reason=reason)
                 continue
             self.history.record_candidate({
                 "_id": candidate_id, "candidate_id": candidate_id,
@@ -320,6 +338,9 @@ class EvolutionController:
                 "changed_paths": candidate_source.changed_paths,
                 "attempt": attempt, "created_at": utc_now(),
             })
+            self._progress("candidate_ready", candidate_id=candidate_id,
+                           candidate_commit=candidate_source.candidate_commit,
+                           parent_commit=baseline_commit, candidate_source=str(candidate_source.worktree))
             result = self._evaluate_candidate(
                 run_id=run_id, candidate_id=candidate_id, baseline_commit=baseline_commit,
                 baseline_source=baseline_source, candidate_source=candidate_source,
@@ -339,6 +360,8 @@ class EvolutionController:
         original, generated, regressions, validation, negative, observed_violation,
     ):
         try:
+            self._progress("evaluating", candidate_id=candidate_id,
+                           candidate_commit=candidate_source.candidate_commit)
             decision = self.evaluator.select(
                 candidate_id=candidate_id, parent_commit=baseline_commit,
                 candidate_commit=candidate_source.candidate_commit,
@@ -355,12 +378,19 @@ class EvolutionController:
             return {"run_id": run_id, "status": "open", "selection": summary}
         summary = decision.summary()
         self.history.record_candidate_result(candidate_id, summary)
+        self._progress("selection_decided", candidate_id=candidate_id, plan_id=decision.plan_id,
+                       accepted=decision.accepted, reasons=list(decision.reasons))
         if decision.accepted:
             from self_heal.contracts import model_identity
+            candidate_record = self.history.candidates.find_one({"_id": candidate_id}) or {}
             environment_hash = canonical_hash({
                 "candidate_commit": candidate_source.candidate_commit,
                 "parent_commit": baseline_commit, "config_hash": self.config.config_hash,
                 "image": self.runner.image_identity(), "model": model_identity(self.model_factory()),
+                "workflows": {
+                    "parent_workflow_revision_id": candidate_record.get("parent_workflow_revision_id"),
+                    "candidate_workflow_revision_id": candidate_record.get("workflow_revision_id"),
+                },
             })
             try:
                 promotion = PromotionManager(self.history, self.repository).activate(
@@ -373,6 +403,9 @@ class EvolutionController:
                 raise EvolutionBlocked(str(exc)) from exc
             self.history.add_case_exposure(original.case_id, role="regression", source="accepted_candidate", at=utc_now())
             self.history.update_gap(run_id, status="resolved", reason="Validated candidate activated")
+            self._progress("promotion_completed", candidate_id=candidate_id,
+                           candidate_commit=candidate_source.candidate_commit,
+                           plan_id=decision.plan_id, **promotion)
             return {"run_id": run_id, "status": "activated", "candidate_id": candidate_id,
                     "candidate_commit": candidate_source.candidate_commit,
                     "selection": summary, "promotion": promotion}

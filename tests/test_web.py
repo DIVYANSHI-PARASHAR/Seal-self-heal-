@@ -202,6 +202,51 @@ def test_logistics_ui_loads_public_bundle_and_records_reviewed_tool_call():
     assert stored["evidence"]["tool_calls"][0]["name"] == "count_customers_over_shipment_threshold"
     assert stored["evidence"]["tool_calls"][0]["result"]["value"] == 2
     assert app.history.get_run(run["run_id"])["invocation"]["task_family"] == "logistics-shipment-threshold"
+
+
+def test_logistics_ui_uses_the_active_pinned_candidate(monkeypatch):
+    app = make_application(supported_model)
+    app.logistics = LogisticsDatasetStore(app.history.runs.database)
+    app.logistics.ensure_indexes()
+    _, seeded = app.api("POST", "/api/datasets/logistics", {})
+    app.history.active_versions.insert_one({
+        "_id": "logistics-shipment-threshold", "commit": "accepted-logistics",
+        "workflow_revision_id": "workflow_logistics_candidate",
+    })
+    observed = {}
+
+    def active_checkout(self, commit):
+        observed["commit"] = commit
+        return Path("/accepted-logistics")
+
+    def candidate_run(self, **kwargs):
+        observed.update({
+            "source": kwargs["source"], "source_commit": kwargs["source_commit"],
+            "dataset": kwargs["dataset"].dataset_id, "family": self.config.task_family,
+        })
+        return RunExecution(
+            RunResult("logistics-candidate", {"value": 2}, None, "answered", {
+                "operation": "count_customers_with_shipment_count_gt", "warehouse_number": 3,
+                "relative_day": "yesterday", "threshold": 15,
+            }, 0, 1, 0, 0.1, 2, 200),
+            TraceEvidence(None, None, "disabled", "test", None, None), "recorded",
+        )
+
+    monkeypatch.setattr("self_heal.web.CandidateRepository.active_checkout", active_checkout)
+    monkeypatch.setattr("self_heal.web.CandidateRunner.run", candidate_run)
+    status, run = app.api("POST", "/api/runs", {
+        "input_kind": "logistics_bundle", "dataset_id": seeded["id"],
+        "question": "How many customers sent more than 15 shipments from warehouse 3 yesterday?",
+    })
+    assert status == 201
+    assert run["answer"] == {"value": 2}
+    assert observed == {
+        "commit": "accepted-logistics", "source": Path("/accepted-logistics"),
+        "source_commit": "accepted-logistics", "dataset": seeded["id"],
+        "family": "logistics-shipment-threshold",
+    }
+
+
 def test_local_ui_never_auto_selects_a_protected_evaluation_table():
     application = make_application(supported_model, dataset_ids=("eval-only", "incident-generated", "private-generated"))
     with pytest.raises(WebRequestError, match="No operator dataset"):

@@ -427,9 +427,14 @@ class SelectionEvaluator:
         if len({case.case_id for case in cases}) != len(cases):
             raise ValueError("Selection cases must be distinct")
         image = self.runner.image_identity()
+        candidate_record = self.history.candidates.find_one({"_id": candidate_id}) or {}
+        workflow_identity = {
+            "parent_workflow_revision_id": candidate_record.get("parent_workflow_revision_id"),
+            "candidate_workflow_revision_id": candidate_record.get("workflow_revision_id"),
+        }
         identity = {"candidate_commit": candidate_commit, "parent_commit": parent_commit,
                     "config_hash": self.config.config_hash, "image": image,
-                    "model": model_identity(model_factory())}
+                    "model": model_identity(model_factory()), "workflows": workflow_identity}
         environment_hash = canonical_hash(identity)
         plan_id = "plan_" + secrets.token_hex(16)
         self.history.record_selection_plan({
@@ -437,6 +442,7 @@ class SelectionEvaluator:
             "candidate_commit": candidate_commit, "parent_commit": parent_commit,
             "config_hash": self.config.config_hash, "environment_hash": environment_hash,
             "identity": identity, "cases": [case.plan_record() for case in cases],
+            **workflow_identity,
             "created_at": utc_now(),
         })
         trials: list[dict[str, Any]] = []
@@ -479,6 +485,9 @@ class SelectionEvaluator:
                                       "version": version}, "plan_id": plan_id,
                         "environment_hash": environment_hash, "case_role": case.role,
                         "repeat": repeat,
+                        "workflow_revision_id": (workflow_identity["parent_workflow_revision_id"]
+                                                 if version == "baseline"
+                                                 else workflow_identity["candidate_workflow_revision_id"]),
                     })
                     self.history.record_evaluation(record)
                     trials.append({

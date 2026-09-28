@@ -48,22 +48,31 @@ class PromotionManager:
             raise PromotionRejected("Active parent changed; candidate requires reevaluation")
         if not active and not self.history.versions.find_one({"commit": expected, "status": "baseline"}):
             baseline_id = new_version_id()
-            self.history.record_version({
+            baseline = {
                 "_id": baseline_id, "version_id": baseline_id, "commit": expected,
                 "task_family": task_family, "identity_hash": canonical_hash({"baseline": expected}),
                 "status": "baseline", "created_at": utc_now(),
-            })
+            }
+            if candidate.get("parent_workflow_revision_id"):
+                baseline["workflow_revision_id"] = candidate["parent_workflow_revision_id"]
+            self.history.record_version(baseline)
+        workflow_revision_id = candidate.get("workflow_revision_id")
         version_id = new_version_id()
-        self.history.record_version({
+        version = {
             "_id": version_id, "version_id": version_id, "commit": source.candidate_commit,
             "parent_commit": expected, "candidate_id": candidate_id,
             "task_family": task_family, "identity_hash": decision.environment_hash,
             "environment_hash": decision.environment_hash, "selection_plan_id": decision.plan_id,
             "status": "tested", "created_at": utc_now(),
-        })
+        }
+        if workflow_revision_id:
+            version["workflow_revision_id"] = workflow_revision_id
+            version["parent_workflow_revision_id"] = candidate.get("parent_workflow_revision_id")
+        self.history.record_version(version)
         if not self.history.compare_and_swap_active(
             task_family=task_family, expected_parent=expected, commit=source.candidate_commit,
             evidence_id=decision.plan_id, environment_hash=decision.environment_hash, at=utc_now(),
+            workflow_revision_id=workflow_revision_id,
         ):
             self.history.append_version_transition(version_id, status="stale", at=utc_now(),
                                                    reason="Active parent changed")
@@ -73,7 +82,8 @@ class PromotionManager:
             self.history.append_version_transition(previous_version["version_id"], status="superseded", at=utc_now())
         self.history.append_candidate_transition(candidate_id, status="accepted", at=utc_now())
         return {"version_id": version_id, "active_commit": source.candidate_commit,
-                "previous_commit": expected, "selection_plan_id": decision.plan_id}
+                "previous_commit": expected, "selection_plan_id": decision.plan_id,
+                "workflow_revision_id": workflow_revision_id}
 
     def rollback(self, *, task_family: str, expected_active: str, target_commit: str,
                  reason: str) -> dict[str, Any]:
@@ -90,12 +100,14 @@ class PromotionManager:
             task_family=task_family, expected_parent=expected_active, commit=target_commit,
             evidence_id="rollback:" + target["version_id"],
             environment_hash=target.get("environment_hash", "baseline"), at=utc_now(),
+            workflow_revision_id=target.get("workflow_revision_id"),
         ):
             raise PromotionRejected("Active version changed before rollback")
         rollback_id = new_version_id()
         self.history.record_version({
             "_id": rollback_id, "version_id": rollback_id, "commit": target_commit,
             "parent_commit": expected_active, "task_family": task_family,
+            "workflow_revision_id": target.get("workflow_revision_id"),
             "status": "rollback", "reason": reason, "created_at": utc_now(),
         })
         if previous_version:
@@ -104,4 +116,5 @@ class PromotionManager:
         if target["status"] == "superseded":
             self.history.append_version_transition(target["version_id"], status="active", at=utc_now(), reason="rollback")
         return {"version_id": rollback_id, "active_commit": target_commit,
-                "previous_commit": expected_active, "reason": reason}
+                "previous_commit": expected_active, "reason": reason,
+                "workflow_revision_id": target.get("workflow_revision_id")}

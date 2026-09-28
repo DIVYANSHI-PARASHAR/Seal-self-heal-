@@ -22,6 +22,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
+from pymongo import ASCENDING
+
 from harness.agent import RunResult, logistics_capability_request
 from harness.tools import AnalystTools
 from harness.logistics import LogisticsAgent, LogisticsTools, TOOL_VERSION
@@ -34,8 +36,10 @@ from self_heal.telemetry import LangSmithTelemetry
 from self_heal.repository import CandidateRepository
 from self_heal.runner import CandidateRunner
 from self_heal.evidence import safe_payload
-from self_heal.logistics_store import LogisticsDatasetStore
-from self_heal.contracts import canonical_hash
+from self_heal.logistics_store import DatasetBundleInfo, LogisticsDatasetStore
+from self_heal.contracts import canonical_hash, source_identity, utc_now
+from self_heal.evolution_jobs import EvolutionJobService
+from self_heal.workflow import extract_workflow, proposal_overlay, workflow_diff
 from evals.logistics.generator import public_incident_bundle
 
 
@@ -154,12 +158,40 @@ def _history_summary(record: dict[str, Any], *, detail: bool = False) -> dict[st
             "error_type": trace.get("error_type"),
         },
         "history_status": record.get("status"),
+        "workflow_revision_id": record.get("workflow_revision_id"),
+        "evolution_job_id": record.get("evolution_job_id"),
         "version": (TOOL_VERSION if (record.get("dataset") or {}).get("input_kind") == "logistics_bundle"
                     and record.get("outcome") == "answered" and (record.get("interpreted_task") or {}).get("operation") == "count_customers_with_shipment_count_gt"
                     else (record.get("execution") or {}).get("source", {}).get("commit") or
                          (record.get("execution") or {}).get("config", {}).get("task_contract_version")),
         **({"evidence": record.get("evidence")} if detail else {}),
     }
+
+
+def _workflow_summary(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "workflow_revision_id": record.get("workflow_revision_id"),
+        "task_family": record.get("task_family"),
+        "source_commit": record.get("source_commit"),
+        "configuration_hash": record.get("configuration_hash"),
+        "graph_hash": record.get("graph_hash"),
+        "created_at": record.get("created_at"),
+        "node_count": len((record.get("graph") or {}).get("nodes") or []),
+        "edge_count": len((record.get("graph") or {}).get("edges") or []),
+    }
+
+
+def _event_summary(record: dict[str, Any]) -> dict[str, Any]:
+    return {"event_id": record.get("event_id"), "sequence": record.get("sequence"),
+            "stage": record.get("stage"), "payload": record.get("payload") or {},
+            "created_at": record.get("created_at")}
+
+
+def _safe_job(record: dict[str, Any]) -> dict[str, Any]:
+    fields = ("job_id", "incident_run_id", "task_family", "workflow_revision_id", "status", "stage", "reason",
+              "candidate_id", "candidate_commit", "plan_id", "rerun_run_id", "proposal", "result",
+              "created_at", "updated_at", "next_event_sequence")
+    return {field: record.get(field) for field in fields if record.get(field) is not None}
 
 
 class WebApplication:
@@ -175,6 +207,7 @@ class WebApplication:
         model_factory: Callable[[], ChatModel],
         tracing: LangSmithConfig,
         logistics: LogisticsDatasetStore | None = None,
+        evolution_controller_factory: Callable[[Callable[[str, dict[str, Any]], None]], Any] | None = None,
     ) -> None:
         self.store = store
         self.history = history
@@ -183,6 +216,91 @@ class WebApplication:
         self.model_factory = model_factory
         self.tracing = tracing
         self.logistics = logistics
+        self.evolution_jobs = EvolutionJobService(
+            history=history,
+            controller_factory=evolution_controller_factory,
+            capture_candidate_workflow=self._capture_candidate_workflow,
+            rerun=self._rerun_evolved_incident,
+        )
+        self.evolution_jobs.resume_pending()
+
+    def _config_for_family(self, task_family: str) -> AnalystConfig:
+        if task_family != "logistics-shipment-threshold":
+            return self.config
+        contract = (self.config.task_contracts or {}).get("logistics-shipment-threshold-v1")
+        if not contract:
+            raise WebRequestError("Logistics task contract is unavailable")
+        return replace(self.config, task_family="logistics-shipment-threshold",
+                       task_contract_version="logistics-shipment-threshold-v1",
+                       contract_hash=canonical_hash(contract))
+
+    def _ensure_workflow(self, *, task_family: str, source: Path, source_commit: str) -> str:
+        snapshot = extract_workflow(source=source, source_commit=source_commit,
+                                    config=self._config_for_family(task_family), task_family=task_family)
+        stored = self.history.record_workflow(snapshot.record)
+        return stored["workflow_revision_id"]
+
+    def _capture_candidate_workflow(self, job: dict[str, Any], payload: dict[str, Any]) -> str | None:
+        candidate_id, commit, source = payload.get("candidate_id"), payload.get("candidate_commit"), payload.get("candidate_source")
+        if not isinstance(candidate_id, str) or not isinstance(commit, str) or not isinstance(source, str):
+            raise WebRequestError("Candidate workflow metadata is incomplete")
+        candidate_source = Path(source).resolve()
+        if not (candidate_source / "harness").is_dir():
+            raise WebRequestError("Candidate harness source is unavailable")
+        family = (self.history.get_evolution_job(job["job_id"]) or job).get("task_family") or self.config.task_family
+        revision = self._ensure_workflow(task_family=family, source=candidate_source, source_commit=commit)
+        candidate = self.history.candidates.find_one({"_id": candidate_id}) or {}
+        self.history.attach_candidate_workflow(
+            candidate_id, workflow_revision_id=revision,
+            parent_workflow_revision_id=job.get("workflow_revision_id"),
+            proposal=proposal_overlay(
+                base_revision_id=job.get("workflow_revision_id") or "unknown",
+                changed_mechanism=candidate.get("changed_mechanism", "harness change"),
+                hypothesis=candidate.get("hypothesis", ""), diff=candidate.get("diff"),
+            ),
+        )
+        return revision
+
+    def _rerun_evolved_incident(self, job: dict[str, Any], result: dict[str, Any]) -> str | None:
+        """Run one pinned post-activation verification without creating another job."""
+
+        observed = self.history.get_run(job["incident_run_id"])
+        if not observed:
+            return None
+        invocation = observed.get("invocation") or {}
+        question = invocation.get("question")
+        dataset = observed.get("dataset") or {}
+        if not isinstance(question, str) or not isinstance(dataset.get("id"), str):
+            return None
+        request = {"question": question, "dataset_id": dataset["id"]}
+        if dataset.get("input_kind") == "logistics_bundle":
+            request["input_kind"] = "logistics_bundle"
+        try:
+            promotion = result.get("promotion") or {}
+            commit = promotion.get("active_commit")
+            workflow_revision_id = promotion.get("workflow_revision_id")
+            if commit:
+                source = CandidateRepository(PROJECT_ROOT).active_checkout(commit)
+                logistics_input = request.get("input_kind") == "logistics_bundle"
+                if logistics_input:
+                    if self.logistics is None:
+                        return None
+                    pinned_dataset = self.logistics.dataset_info(dataset["id"])
+                    config = self._config_for_family("logistics-shipment-threshold")
+                else:
+                    pinned_dataset = self.store.dataset_info(dataset["id"])
+                    config = self.config
+                execution = CandidateRunner(
+                    store=self.store, logistics=self.logistics, config=config, history=self.history, telemetry=self.telemetry,
+                    image=os.environ.get("SELF_HEAL_RUNNER_IMAGE", "self-heal-runner:local"),
+                ).run(source=source, source_commit=commit, dataset=pinned_dataset,
+                      invocation=question, model=self.model_factory(),
+                      workflow_revision_id=workflow_revision_id)
+            else:
+                execution, _ = self._run(request)
+            return execution.result.run_id
+        except Exception:
+            return None
 
     def api(self, method: str, path: str, body: dict[str, Any] | None = None) -> tuple[int, dict[str, Any]]:
         """Dispatch a small same-origin API.  This method has no HTTP concerns."""
@@ -211,6 +329,80 @@ class WebApplication:
                       for item in self.logistics.list_dataset_info() if _operator_dataset(item.dataset_id)]
                      if self.logistics is not None else []))
             }
+        if method == "GET" and route.path == "/api/harness-workflows":
+            family = query.get("task_family", [self.config.task_family])[0]
+            if family not in {self.config.task_family, "logistics-shipment-threshold"}:
+                raise WebRequestError("Task family is invalid")
+            active = self.history.active_version(family) or {}
+            workflows = self.history.workflows_for(family, limit=_limit(query))
+            return HTTPStatus.OK, {
+                "task_family": family,
+                "active_workflow_revision_id": active.get("workflow_revision_id"),
+                "active_commit": active.get("commit"),
+                "workflows": [_workflow_summary(item) for item in workflows],
+            }
+        if method == "GET" and route.path.startswith("/api/harness-workflows/") and route.path.endswith("/diff"):
+            revision_id = route.path.removeprefix("/api/harness-workflows/").removesuffix("/diff").rstrip("/")
+            base_id = query.get("base", [None])[0]
+            if not revision_id or not base_id or "/" in revision_id or "/" in base_id:
+                raise WebRequestError("Workflow comparison is invalid")
+            candidate, base = self.history.get_workflow(revision_id), self.history.get_workflow(base_id)
+            if not candidate or not base:
+                return HTTPStatus.NOT_FOUND, {"error": "Workflow revision is unavailable"}
+            if candidate.get("task_family") != base.get("task_family"):
+                raise WebRequestError("Workflows belong to different task families")
+            return HTTPStatus.OK, workflow_diff(base, candidate)
+        if method == "GET" and route.path.startswith("/api/harness-workflows/"):
+            revision_id = route.path.removeprefix("/api/harness-workflows/")
+            if not revision_id or "/" in revision_id:
+                raise WebRequestError("Workflow revision is invalid")
+            record = self.history.get_workflow(revision_id)
+            if not record:
+                return HTTPStatus.NOT_FOUND, {"error": "Workflow revision is unavailable"}
+            return HTTPStatus.OK, {**_workflow_summary(record), "graph": record.get("graph")}
+        if method == "GET" and route.path.startswith("/api/evolution-jobs/") and route.path.endswith("/events"):
+            job_id = route.path.removeprefix("/api/evolution-jobs/").removesuffix("/events").rstrip("/")
+            if not job_id or "/" in job_id:
+                raise WebRequestError("Evolution job ID is invalid")
+            job = self.history.get_evolution_job(job_id)
+            if not job:
+                return HTTPStatus.NOT_FOUND, {"error": "Evolution job is unavailable"}
+            after = _cursor(query, "after")
+            events = self.history.evolution_events_after(job_id, after=after, limit=_limit(query))
+            return HTTPStatus.OK, {"job_id": job_id, "events": [_event_summary(item) for item in events],
+                                   "next_cursor": events[-1]["sequence"] if events else after}
+        if method == "GET" and route.path.startswith("/api/evolution-jobs/") and route.path.endswith("/evaluations"):
+            job_id = route.path.removeprefix("/api/evolution-jobs/").removesuffix("/evaluations").rstrip("/")
+            if not job_id or "/" in job_id:
+                raise WebRequestError("Evolution job ID is invalid")
+            job = self.history.get_evolution_job(job_id)
+            if not job:
+                return HTTPStatus.NOT_FOUND, {"error": "Evolution job is unavailable"}
+            return HTTPStatus.OK, self._job_evaluations(job, limit=_limit(query))
+        if method == "GET" and route.path.startswith("/api/evolution-jobs/"):
+            job_id = route.path.removeprefix("/api/evolution-jobs/")
+            if not job_id or "/" in job_id:
+                raise WebRequestError("Evolution job ID is invalid")
+            job = self.history.get_evolution_job(job_id)
+            if not job:
+                return HTTPStatus.NOT_FOUND, {"error": "Evolution job is unavailable"}
+            payload = _safe_job(job)
+            for key in ("workflow_revision_id", "candidate_id", "plan_id", "rerun_run_id"):
+                if job.get(key):
+                    payload[key + "_url"] = ("/api/harness-workflows/" + job[key] if key == "workflow_revision_id"
+                                              else "/api/runs/" + job[key] if key == "rerun_run_id" else None)
+            candidate = self.history.candidates.find_one({"_id": job.get("candidate_id")}) if job.get("candidate_id") else None
+            if candidate:
+                payload["candidate"] = {"candidate_id": candidate.get("candidate_id"),
+                                        "candidate_commit": candidate.get("candidate_commit"),
+                                        "parent_commit": candidate.get("parent_commit"),
+                                        "workflow_revision_id": candidate.get("workflow_revision_id"),
+                                        "parent_workflow_revision_id": candidate.get("parent_workflow_revision_id"),
+                                        "workflow_proposal": candidate.get("workflow_proposal"),
+                                        "hypothesis": candidate.get("hypothesis"),
+                                        "changed_mechanism": candidate.get("changed_mechanism"),
+                                        "status": candidate.get("status")}
+            return HTTPStatus.OK, payload
         if method == "GET" and route.path == "/api/runs":
             return HTTPStatus.OK, {"runs": [_history_summary(item) for item in self.history.recent_runs(limit=_limit(query))]}
         if method == "GET" and route.path == "/api/evaluations":
@@ -242,6 +434,7 @@ class WebApplication:
                                    "versions": [{"version_id": item.get("version_id"),
                                                  "commit": item.get("commit"), "status": item.get("status"),
                                                  "parent_commit": item.get("parent_commit"),
+                                                 "workflow_revision_id": item.get("workflow_revision_id"),
                                                  "created_at": item.get("created_at")} for item in records]}
         if method == "GET" and route.path == "/api/capability-gaps":
             return HTTPStatus.OK, {
@@ -295,6 +488,14 @@ class WebApplication:
                 payload = _history_summary(record, detail=True) | {"history": payload["history"], "message": payload["message"],
                                                         "dataset": payload["dataset"],
                                                         "gap": self._gap_evidence(payload["run_id"], (record.get("invocation") or {}).get("task_family")) if payload["outcome"] == "unsupported" else None}
+                if self._eligible_for_evolution(record):
+                    job, _ = self.evolution_jobs.queue(
+                        incident_run_id=record["run_id"], workflow_revision_id=record.get("workflow_revision_id"),
+                        task_family=(record.get("invocation") or {}).get("task_family"),
+                    )
+                    payload["evolution_job_id"] = job["job_id"]
+                    payload["evolution_url"] = "#evolve/" + job["job_id"]
+                    payload["evolution_state"] = job.get("status")
             return HTTPStatus.CREATED, payload
         if method == "POST" and route.path == "/api/datasets/logistics":
             if body != {} or self.logistics is None:
@@ -328,7 +529,70 @@ class WebApplication:
                 "cases": [{"id": case["case_id"], "url": "/api/evaluation-cases/" + case["case_id"]} for case in cases],
                 "candidates": result}
 
-    def _run(self, request: dict[str, str]) -> tuple[RunExecution, DatasetInfo]:
+    @staticmethod
+    def _eligible_for_evolution(record: dict[str, Any]) -> bool:
+        if record.get("outcome") == "unsupported":
+            return record.get("limitation_kind") == "capability_gap"
+        if record.get("outcome") == "error":
+            error = (record.get("error") or "").lower()
+            return bool(error) and not any(word in error for word in ("atlas", "network", "provider", "trace"))
+        return False
+
+    def _job_evaluations(self, job: dict[str, Any], *, limit: int) -> dict[str, Any]:
+        candidate = self.history.candidates.find_one({"_id": job.get("candidate_id")}) if job.get("candidate_id") else None
+        plan_id = job.get("plan_id") or ((candidate or {}).get("selection") or {}).get("plan_id")
+        if not plan_id:
+            return {"plan_id": None, "watermark": 0, "scheduled": {}, "groups": [], "trials": []}
+        plan = self.history.selection_plans.find_one({"_id": plan_id})
+        if not plan:
+            return {"plan_id": plan_id, "watermark": 0, "scheduled": {}, "groups": [], "trials": []}
+        role_by_case = {case["case_id"]: case.get("role", "selection") for case in plan.get("cases", [])}
+        scheduled: dict[str, dict[str, int]] = {"baseline": {}, "candidate": {}}
+        for role in role_by_case.values():
+            repeats = self.config.evaluation.live_repetitions if role in {"original", "private_validation"} else 1
+            for version in scheduled.values():
+                version[role] = version.get(role, 0) + repeats
+        records = list(self.history.evaluations.find({"plan_id": plan_id}).sort("created_at", ASCENDING))
+        grouped: dict[tuple[str, str], dict[str, Any]] = {}
+        safe_trials = []
+        for item in records:
+            candidate_record = item.get("candidate") or {}
+            version = candidate_record.get("version", "candidate")
+            role = item.get("case_role") or role_by_case.get(item.get("case_id"), "selection")
+            key = (version, role)
+            stats = grouped.setdefault(key, {"version": version, "role": role, "completed": 0, "passed": 0, "failed": 0,
+                                             "elapsed_seconds": [], "total_tokens": [], "table_pages": []})
+            stats["completed"] += 1
+            stats["passed" if item.get("passed") else "failed"] += 1
+            resources = item.get("resources") or {}
+            for metric in ("elapsed_seconds", "total_tokens", "table_pages"):
+                if isinstance(resources.get(metric), (int, float)):
+                    stats[metric].append(resources[metric])
+            protected = role == "private_validation"
+            safe_trials.append({
+                "trial_id": item.get("trial_id"), "case_id": None if protected else item.get("case_id"),
+                "case_label": "Private validation" if protected else item.get("case_id"),
+                "role": role, "version": version, "repeat": item.get("repeat"),
+                "passed": item.get("passed"), "status": "completed", "violation": None if protected else item.get("violation"),
+                "run_id": item.get("run_id"), "resources": resources, "trace_id": item.get("trace_id"),
+                "created_at": item.get("created_at"),
+            })
+        groups = []
+        for (version, role), stats in sorted(grouped.items()):
+            expected = scheduled.get(version, {}).get(role, 0)
+            groups.append({
+                "version": version, "role": role, "expected": expected, "completed": stats["completed"],
+                "passed": stats["passed"], "failed": stats["failed"],
+                "pending": max(expected - stats["completed"], 0),
+                "metrics": {metric: round(sum(values) / len(values), 3) if values else None
+                            for metric, values in (("elapsed_seconds", stats["elapsed_seconds"]),
+                                                   ("total_tokens", stats["total_tokens"]),
+                                                   ("table_pages", stats["table_pages"]))},
+            })
+        return {"plan_id": plan_id, "watermark": len(records), "scheduled": scheduled,
+                "groups": groups, "trials": safe_trials[-limit:]}
+
+    def _run(self, request: dict[str, str]) -> tuple[RunExecution, DatasetInfo | DatasetBundleInfo]:
         dataset_id = request.get("dataset_id")
         if dataset_id is not None and not _operator_dataset(dataset_id):
             raise WebRequestError("Protected evaluation datasets are unavailable to operator runs")
@@ -337,34 +601,55 @@ class WebApplication:
                 raise WebRequestError("Select a ready logistics bundle before running this question")
             if logistics_capability_request(request["question"]) is None:
                 raise WebRequestError("This version only recognizes the customer shipment threshold question")
-            if self.history.active_version("logistics-shipment-threshold"):
-                raise WebRequestError("The active logistics candidate needs a compatible runner before browser execution")
             dataset = self.logistics.dataset_info(dataset_id)
             contract = (self.config.task_contracts or {}).get("logistics-shipment-threshold-v1")
             if not contract:
                 raise WebRequestError("Logistics task contract is unavailable")
             logistics_config = replace(self.config, task_family="logistics-shipment-threshold",
                 task_contract_version="logistics-shipment-threshold-v1", contract_hash=canonical_hash(contract))
+            active = self.history.active_version(logistics_config.task_family)
+            if active:
+                source = CandidateRepository(PROJECT_ROOT).active_checkout(active["commit"])
+                workflow_revision_id = active.get("workflow_revision_id") or self._ensure_workflow(
+                    task_family=logistics_config.task_family, source=source, source_commit=active["commit"])
+                execution = CandidateRunner(
+                    store=self.store, logistics=self.logistics, config=logistics_config,
+                    history=self.history, telemetry=self.telemetry,
+                    image=os.environ.get("SELF_HEAL_RUNNER_IMAGE", "self-heal-runner:local"),
+                ).run(source=source, source_commit=active["commit"], dataset=dataset,
+                      invocation=request["question"], model=self.model_factory(),
+                      workflow_revision_id=workflow_revision_id)
+                return execution, dataset
+            workflow_revision_id = self._ensure_workflow(task_family=logistics_config.task_family,
+                                                          source=PROJECT_ROOT, source_commit=TOOL_VERSION)
             execution = RunExecutor(history=self.history, telemetry=self.telemetry, config=logistics_config).run(
                 model=self.model_factory(), tools=LogisticsTools(self.logistics.open_session(dataset_id), logistics_config),
-                dataset=dataset, invocation=request["question"], agent_factory=LogisticsAgent)
+                dataset=dataset, invocation=request["question"], agent_factory=LogisticsAgent,
+                workflow_revision_id=workflow_revision_id)
             return execution, dataset
         dataset = self.store.dataset_info(dataset_id) if dataset_id is not None else self._default_dataset()
         active = self.history.active_version(self.config.task_family)
         if active:
             source = CandidateRepository(PROJECT_ROOT).active_checkout(active["commit"])
+            workflow_revision_id = active.get("workflow_revision_id") or self._ensure_workflow(
+                task_family=self.config.task_family, source=source, source_commit=active["commit"])
             execution = CandidateRunner(
-                store=self.store, config=self.config, history=self.history, telemetry=self.telemetry,
+                store=self.store, logistics=self.logistics, config=self.config, history=self.history, telemetry=self.telemetry,
                 image=os.environ.get("SELF_HEAL_RUNNER_IMAGE", "self-heal-runner:local"),
             ).run(source=source, source_commit=active["commit"], dataset=dataset,
-                  invocation=request["question"], model=self.model_factory())
+                  invocation=request["question"], model=self.model_factory(),
+                  workflow_revision_id=workflow_revision_id)
             return execution, dataset
         table = self.store.open_session(dataset.dataset_id)
+        baseline_commit = source_identity()["source"]["commit"]
+        workflow_revision_id = self._ensure_workflow(task_family=self.config.task_family,
+                                                      source=PROJECT_ROOT, source_commit=baseline_commit)
         execution = RunExecutor(history=self.history, telemetry=self.telemetry, config=self.config).run(
             model=self.model_factory(),
             tools=AnalystTools(table, self.config),
             dataset=dataset,
             invocation=request["question"],
+            workflow_revision_id=workflow_revision_id,
         )
         return execution, dataset
 
@@ -392,6 +677,17 @@ def _limit(query: dict[str, list[str]]) -> int:
         return int(value)
     except (TypeError, ValueError) as exc:
         raise WebRequestError("History limit must be an integer") from exc
+
+
+def _cursor(query: dict[str, list[str]], name: str) -> int:
+    value = query.get(name, ["0"])[0]
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise WebRequestError("Evolution event cursor is invalid") from exc
+    if parsed < 0:
+        raise WebRequestError("Evolution event cursor is invalid")
+    return parsed
 
 
 def _run_request(body: dict[str, Any] | None) -> dict[str, str]:

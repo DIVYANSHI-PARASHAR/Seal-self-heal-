@@ -11,7 +11,8 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from harness.agent import RunResult
+from harness.agent import RunResult, logistics_capability_request
+from harness.logistics import LogisticsTools
 from harness.tools import AnalystTools
 from evals.analyst.oracle import OracleError, _validate_task
 from self_heal.contracts import (
@@ -22,6 +23,7 @@ from self_heal.model import ChatModel
 from self_heal.settings import AnalystConfig
 from self_heal.storage import AtlasHistoryStore
 from self_heal.table_store import AtlasTableStore, DatasetInfo
+from self_heal.logistics_store import DatasetBundleInfo, LogisticsDatasetStore
 from self_heal.telemetry import LangSmithTelemetry
 from self_heal.evidence import EvidenceTools, run_evidence
 
@@ -32,11 +34,12 @@ class RunnerError(RuntimeError):
 
 class CandidateRunner:
     def __init__(
-        self, *, store: AtlasTableStore, config: AnalystConfig, telemetry: LangSmithTelemetry,
+        self, *, store: AtlasTableStore | None, config: AnalystConfig, telemetry: LangSmithTelemetry,
         history: AtlasHistoryStore | None, image: str = "self-heal-runner:local",
-        repository: Path | None = None,
+        repository: Path | None = None, logistics: LogisticsDatasetStore | None = None,
     ) -> None:
-        self.store, self.config, self.telemetry, self.history = store, config, telemetry, history
+        self.store, self.logistics = store, logistics
+        self.config, self.telemetry, self.history = config, telemetry, history
         self.image = image
         self.repository = (repository or Path(__file__).resolve().parents[2]).resolve()
 
@@ -59,9 +62,10 @@ class CandidateRunner:
         return self.image_identity()
 
     def run(
-        self, *, source: Path, source_commit: str, dataset: DatasetInfo,
+        self, *, source: Path, source_commit: str, dataset: DatasetInfo | DatasetBundleInfo,
         invocation: dict[str, Any] | str, model: ChatModel,
         case_id: str | None = None, case_exposure: str | None = None,
+        workflow_revision_id: str | None = None,
     ) -> RunExecution:
         image_digest = self.image_identity()
         source = source.resolve()
@@ -76,10 +80,23 @@ class CandidateRunner:
                                capture_output=True, text=True, check=False, timeout=5)
         if head.returncode or dirty.returncode or head.stdout.strip() != source_commit or dirty.stdout.strip():
             raise RunnerError("Candidate source does not match its pinned clean commit")
-        verified = self.store.dataset_info(dataset.dataset_id)
+        input_kind = dataset.input_kind
+        if input_kind == "logistics_bundle":
+            if self.logistics is None:
+                raise RunnerError("Logistics candidate execution is not configured")
+            verified = self.logistics.dataset_info(dataset.dataset_id)
+            table = self.logistics.open_session(dataset.dataset_id)
+            audited_tools = EvidenceTools(LogisticsTools(table, self.config))
+        elif input_kind == "inventory_table":
+            if self.store is None:
+                raise RunnerError("Inventory candidate execution is not configured")
+            verified = self.store.dataset_info(dataset.dataset_id)
+            table = self.store.open_session(dataset.dataset_id)
+            audited_tools = EvidenceTools(AnalystTools(table, self.config))
+        else:
+            raise RunnerError("Candidate input kind is not supported")
         if verified != dataset:
             raise RunnerError("Dataset identity changed before execution")
-        table = self.store.open_session(dataset.dataset_id)
         run_id, started_at = new_run_id(), utc_now()
         status = "not_configured" if self.history is None else "recording"
         history_error = None
@@ -91,12 +108,12 @@ class CandidateRunner:
                     model=model, started_at=started_at, case_id=case_id,
                     case_exposure=case_exposure, source_commit=source_commit,
                     runner_image_digest=image_digest,
+                    workflow_revision_id=workflow_revision_id,
                 ))
                 started = True
             except Exception as exc:
                 status, history_error = "incomplete", type(exc).__name__
 
-        audited_tools = EvidenceTools(AnalystTools(table, self.config))
         result, trace = self.telemetry.execute(
             run_id=run_id, invocation=invocation,
             metadata=trace_metadata(
@@ -106,7 +123,7 @@ class CandidateRunner:
             ),
             model=model, tools=audited_tools, started_at=started_at,
             execute=lambda traced_model, traced_tools: self._execute_container(
-                harness_dir, invocation, run_id, table, traced_model, traced_tools,
+                harness_dir, invocation, run_id, table, traced_model, traced_tools, input_kind=input_kind,
             ),
         )
         if self.history and started:
@@ -120,8 +137,13 @@ class CandidateRunner:
                 status, history_error = "incomplete", type(exc).__name__
         return RunExecution(result=result, trace=trace, history_status=status, history_error=history_error)
 
-    def _execute_container(self, harness_dir, invocation, run_id, table, model, tools) -> RunResult:
+    def _execute_container(
+        self, harness_dir, invocation, run_id, table, model, tools, *, input_kind: str | None = None,
+    ) -> RunResult:
         limits = self.config.limits
+        input_kind = input_kind or getattr(table, "input_kind", "inventory_table")
+        if input_kind not in {"inventory_table", "logistics_bundle"}:
+            raise RunnerError("Candidate input kind is not supported")
         command = [
             "docker", "run", "--rm", "-i", "--network", "none", "--read-only",
             "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "64",
@@ -139,7 +161,7 @@ class CandidateRunner:
             process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                        stderr=subprocess.DEVNULL, bufsize=0)
             assert process.stdin and process.stdout
-            self._send(process, {"run_id": run_id, "invocation": invocation, "config": {
+            self._send(process, {"run_id": run_id, "invocation": invocation, "input_kind": input_kind, "config": {
                 "metrics": self.config.metrics, "filter_fields": self.config.filter_fields,
                 "group_fields": self.config.group_fields, "table_schema": self.config.table_schema,
                 "limits": asdict(limits),
@@ -179,6 +201,8 @@ class CandidateRunner:
                                 value = {"content": reply.content, "total_tokens": reply.total_tokens,
                                          "tool_calls": [asdict(call) for call in reply.tool_calls]}
                             elif kind == "table":
+                                if input_kind != "inventory_table":
+                                    raise RunnerError("Inventory table access is unavailable for this input")
                                 operation, arguments = request.get("operation"), request.get("arguments")
                                 if not isinstance(arguments, dict):
                                     raise RunnerError("Invalid table request")
@@ -194,9 +218,29 @@ class CandidateRunner:
                                     value = table.completed_scan(**arguments)
                                 else:
                                     raise RunnerError("Table operation is not permitted")
+                            elif kind == "logistics":
+                                if input_kind != "logistics_bundle":
+                                    raise RunnerError("Logistics access is unavailable for this input")
+                                operation, arguments = request.get("operation"), request.get("arguments")
+                                if not isinstance(arguments, dict):
+                                    raise RunnerError("Invalid logistics request")
+                                if operation == "inspect_catalog" and not arguments:
+                                    value = table.inspect_catalog()
+                                elif operation == "inspect_relation" and set(arguments) == {"relation"} and isinstance(arguments["relation"], str):
+                                    value = table.inspect_relation(**arguments)
+                                elif operation == "read_shipments" and set(arguments) <= {
+                                    "warehouse_number", "relative_day", "limit", "cursor"
+                                }:
+                                    value = table.read_shipments(**arguments)
+                                else:
+                                    raise RunnerError("Logistics operation is not permitted")
                             elif kind == "tool_result":
                                 observed_tools += 1
-                                if observed_tools > tool_calls:
+                                if input_kind == "logistics_bundle":
+                                    tool_calls = observed_tools
+                                    if tool_calls > limits.max_tool_calls:
+                                        raise RunnerError("Tool-call budget exceeded")
+                                elif observed_tools > tool_calls:
                                     raise RunnerError("Unmatched candidate tool envelope")
                                 name, arguments, value = request.get("name"), request.get("arguments"), request.get("result")
                                 if not isinstance(name, str) or not isinstance(arguments, dict) or not isinstance(value, dict):
@@ -233,16 +277,29 @@ class CandidateRunner:
             if not isinstance(answer, dict) or not isinstance(interpreted, dict):
                 error = "Candidate returned an invalid answer envelope"
             else:
-                try:
-                    _validate_task(interpreted, self.config)
-                except OracleError:
-                    error = "Candidate returned a task outside the protected contract"
-                if error is None and isinstance(invocation, dict) and interpreted != invocation:
-                    error = "Candidate changed the requested structured task"
-                if error is None and not _valid_answer(answer, grouped=interpreted.get("group_by") is not None):
-                    error = "Candidate returned an invalid answer shape"
-                if error is None and not table.completed_scan(interpreted.get("filter_field"), interpreted.get("filter_value")):
-                    error = "Required table rows were not fully read"
+                if input_kind == "logistics_bundle":
+                    expected = _logistics_task_for(invocation)
+                    if expected is None or interpreted != expected:
+                        error = "Candidate returned a task outside the protected logistics contract"
+                    if error is None and not _valid_answer(answer, grouped=False):
+                        error = "Candidate returned an invalid answer shape"
+                    if error is None and observed_tools == 0:
+                        error = "Candidate did not execute an observed logistics tool"
+                    if error is None and not table.completed_shipment_scan(
+                        interpreted["warehouse_number"], interpreted["relative_day"],
+                    ):
+                        error = "Required shipment rows were not fully read"
+                else:
+                    try:
+                        _validate_task(interpreted, self.config)
+                    except OracleError:
+                        error = "Candidate returned a task outside the protected contract"
+                    if error is None and isinstance(invocation, dict) and interpreted != invocation:
+                        error = "Candidate changed the requested structured task"
+                    if error is None and not _valid_answer(answer, grouped=interpreted.get("group_by") is not None):
+                        error = "Candidate returned an invalid answer shape"
+                    if error is None and not table.completed_scan(interpreted.get("filter_field"), interpreted.get("filter_value")):
+                        error = "Required table rows were not fully read"
         if outcome not in {"answered", "unsupported", "error"}:
             error = error or "Candidate returned an invalid outcome"
         if elapsed > limits.max_elapsed_seconds:
@@ -272,3 +329,24 @@ def _valid_answer(answer: dict[str, Any], *, grouped: bool) -> bool:
                 and list(groups) == sorted(groups)
                 and all(isinstance(key, str) and type(value) is int for key, value in groups.items()))
     return set(answer) == {"value"} and type(answer.get("value")) is int
+
+
+def _logistics_task_for(invocation: dict[str, Any] | str) -> dict[str, Any] | None:
+    """Return the one canonical task a logistics candidate may execute."""
+
+    if isinstance(invocation, str):
+        request = logistics_capability_request(invocation)
+        if request is None:
+            return None
+        return {key: request[key] for key in (
+            "operation", "warehouse_number", "relative_day", "threshold",
+        )}
+    required = {"operation", "warehouse_number", "relative_day", "threshold"}
+    if set(invocation) != required:
+        return None
+    if (invocation["operation"] != "count_customers_with_shipment_count_gt"
+            or type(invocation["warehouse_number"]) is not int or invocation["warehouse_number"] < 1
+            or invocation["relative_day"] != "yesterday"
+            or type(invocation["threshold"]) is not int or invocation["threshold"] < 0):
+        return None
+    return dict(invocation)

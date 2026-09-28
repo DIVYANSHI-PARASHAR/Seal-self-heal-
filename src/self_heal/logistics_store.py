@@ -249,6 +249,7 @@ class LogisticsSession:
     def __init__(self, shipments: Any, warehouses: Any, bundle: DatasetBundleInfo) -> None:
         self._shipments, self._warehouses, self._bundle = shipments, warehouses, bundle
         self._cursor_key = secrets.token_bytes(32)
+        self._completed_scans: set[str] = set()
         self.pages_read = self.bytes_read = self.rows_read = 0
 
     @property
@@ -282,7 +283,22 @@ class LogisticsSession:
         size = len(json.dumps(rows, separators=(",", ":")).encode())
         self.pages_read += 1; self.bytes_read += size; self.rows_read += len(rows)
         next_cursor = self._encode(page[-1]["position"], fingerprint) if len(docs) > limit else None
+        if next_cursor is None:
+            self._completed_scans.add(fingerprint)
         return {"shipments": rows, "next_cursor": next_cursor}
+
+    def completed_shipment_scan(self, warehouse_number: int, relative_day: str) -> bool:
+        """Whether this session read every scoped shipment page for the request.
+
+        This supervisor-only check lets the isolated candidate runner reject a
+        guessed aggregate that stopped before the signed cursor reached the
+        terminal page. It deliberately takes no candidate-controlled cursor.
+        """
+
+        if type(warehouse_number) is not int or relative_day != "yesterday":
+            return False
+        fingerprint = json.dumps([warehouse_number, relative_day], separators=(",", ":"))
+        return fingerprint in self._completed_scans
 
     def _encode(self, position: int, fingerprint: str) -> str:
         payload = json.dumps({"position": position, "filter": fingerprint}, separators=(",", ":")).encode(); signature = hmac.digest(self._cursor_key, payload, "sha256")

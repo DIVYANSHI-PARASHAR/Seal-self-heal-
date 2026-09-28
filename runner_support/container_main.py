@@ -2,7 +2,6 @@
 
 import json
 import sys
-from dataclasses import asdict
 from types import SimpleNamespace
 
 from self_heal.model import ModelReply, ToolCall
@@ -57,6 +56,36 @@ class RemoteTable:
         }})
 
 
+class RemoteLogistics:
+    """The only logistics interface exposed to code inside the container."""
+
+    input_kind = "logistics_bundle"
+
+    def __init__(self):
+        self.pages_read = 0
+        self.bytes_read = 0
+
+    def inspect_catalog(self):
+        return rpc({"type": "logistics", "operation": "inspect_catalog", "arguments": {}})
+
+    def inspect_relation(self, relation):
+        return rpc({"type": "logistics", "operation": "inspect_relation", "arguments": {
+            "relation": relation,
+        }})
+
+    def read_shipments(self, **arguments):
+        try:
+            value = rpc({"type": "logistics", "operation": "read_shipments", "arguments": arguments})
+        except RuntimeError as exc:
+            raise TableAccessError(str(exc)) from exc
+        shipments = value.get("shipments")
+        if not isinstance(shipments, list):
+            raise TableAccessError("Supervisor returned an invalid shipment page")
+        self.pages_read += 1
+        self.bytes_read += len(json.dumps(shipments, separators=(",", ":")).encode())
+        return value
+
+
 class ObservedTools:
     def __init__(self, inner):
         self.inner = inner
@@ -86,12 +115,18 @@ def namespace(value):
 
 def main():
     initial = json.loads(sys.stdin.readline())
-    from harness.agent import AnalystAgent
-    from harness.tools import AnalystTools
+    config = namespace(initial["config"])
+    if initial.get("input_kind") == "logistics_bundle":
+        from harness.logistics import LogisticsAgent, LogisticsTools
 
-    table = RemoteTable()
-    agent = AnalystAgent(RemoteModel(), ObservedTools(AnalystTools(table, namespace(initial["config"]))),
-                         namespace(initial["config"]))
+        table = RemoteLogistics()
+        agent = LogisticsAgent(RemoteModel(), ObservedTools(LogisticsTools(table, config)), config)
+    else:
+        from harness.agent import AnalystAgent
+        from harness.tools import AnalystTools
+
+        table = RemoteTable()
+        agent = AnalystAgent(RemoteModel(), ObservedTools(AnalystTools(table, config)), config)
     try:
         result = agent.run(initial["invocation"], run_id=initial["run_id"])
         payload = {key: getattr(result, key, None) for key in (
