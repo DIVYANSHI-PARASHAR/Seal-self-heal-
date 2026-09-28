@@ -416,7 +416,10 @@ $("#analysis-form").addEventListener("submit",async event=>{
     const run=await request("/api/runs",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({question:question.value,input_kind:selectedSource.input_kind,dataset_id:selectedSource.id})});
     const full=await request("/api/runs/"+encodeURIComponent(run.run_id)).catch(()=>run);
     renderRun(full);loadHistory();
-    location.hash=run.evolution_job_id ? "evolve/"+run.evolution_job_id : "run-details";
+    const evolutionId=run.evolution_job_id||full.evolution_job_id;
+    const destination=evolutionId ? "evolve/"+evolutionId : "run-details";
+    if(location.hash==="#"+destination)showPage(destination);
+    else location.hash=destination;
   }catch(error){question.setCustomValidity(error.message);question.reportValidity();announce(error.message);}
   finally{updateRunButton();runButton.removeAttribute("aria-busy");runButton.innerHTML=original;}
 });

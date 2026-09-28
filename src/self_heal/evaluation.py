@@ -28,6 +28,20 @@ from self_heal.table_store import AtlasTableStore, DatasetInfo
 from self_heal.runner import CandidateRunner
 
 
+def _verified_dataset(runner: CandidateRunner, dataset: Any) -> Any:
+    """Read a dataset through the runner when it supports non-Atlas bundles.
+
+    The original evaluator only supported Atlas datasets, so its lightweight
+    test runners expose ``store.dataset_info`` rather than a runner method.
+    Keep that contract while allowing the production runner to verify the
+    logistics bundle that was actually passed to the isolated candidate.
+    """
+    lookup = getattr(runner, "dataset_info", None)
+    if callable(lookup):
+        return lookup(dataset)
+    return runner.store.dataset_info(dataset.dataset_id)
+
+
 @dataclass(frozen=True)
 class EvaluationTrial:
     scenario_id: str
@@ -451,7 +465,7 @@ class SelectionEvaluator:
             if self.runner.image_identity() != image:
                 reasons.add("environment_identity_changed")
                 break
-            before = self.runner.store.dataset_info(case.dataset.dataset_id)
+            before = _verified_dataset(self.runner, case.dataset)
             if before != case.dataset:
                 reasons.add("dataset_identity_changed")
                 break
@@ -507,7 +521,7 @@ class SelectionEvaluator:
                         reasons.add("incomplete_history")
                     if self.config.evaluation.require_trace and execution.trace.status != "available":
                         reasons.add("incomplete_trace")
-                    if self.runner.store.dataset_info(case.dataset.dataset_id) != case.dataset:
+                    if _verified_dataset(self.runner, case.dataset) != case.dataset:
                         reasons.add("dataset_identity_changed")
                         break
         def for_case(case, version):

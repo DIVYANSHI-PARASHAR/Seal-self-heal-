@@ -128,22 +128,33 @@ def _inventory_graph(source: Path, config: AnalystConfig) -> dict[str, Any]:
 
 def _logistics_graph(source: Path, config: AnalystConfig) -> dict[str, Any]:
     refs = _source_refs(source, ("harness/logistics.py", "harness/agent.py"))
-    tools = _tool_names(source, logistics=True) or ["count_customers_over_shipment_threshold"]
+    tools = _tool_names(source, logistics=True)
+    has_logistics_agent = (source / "harness" / "logistics.py").is_file()
+    agent_label = "Logistics agent" if has_logistics_agent else "No logistics agent registered"
+    agent_summary = ("Direct reviewed tool dispatch; it makes zero model calls."
+                     if has_logistics_agent else
+                     "This pinned harness has no logistics agent or registered logistics tool.")
+    group_summary = ("Registered logistics tools." if has_logistics_agent else
+                     "No tools are registered for the logistics task family.")
     nodes = [
         _node("context:task", "context_source", "Recognized logistics request", summary="The reviewed threshold request and bounded arguments.", source=refs.get("harness/agent.py", []), layout=(70, 170)),
-        _node("agent:logistics", "agent", "Logistics agent", summary="Direct reviewed tool dispatch; it makes zero model calls.", source=refs.get("harness/logistics.py", []), layout=(305, 205)),
-        _node("group:logistics-tools", "tool_group", "Tools", group="agent:logistics", summary="Registered logistics tools.", layout=(505, 100)),
-        _node("adapter:logistics", "data_adapter", "Scoped logistics session", summary="Bounded catalog and shipment reads with frozen time semantics.", layout=(735, 210)),
-        _node("data:logistics", "data_source", "Atlas logistics bundle", summary="Assigned customers, warehouses, and shipments bundle.", layout=(925, 210)),
+        _node("agent:logistics", "agent", agent_label, summary=agent_summary, source=refs.get("harness/logistics.py", []), layout=(305, 205)),
+        _node("group:logistics-tools", "tool_group", "Tools", group="agent:logistics", summary=group_summary, layout=(505, 100)),
         _node("supervisor:telemetry", "supervisor", "Tracing adapter", summary="Trusted telemetry; not a callable tool.", layout=(525, 400)),
     ]
+    if has_logistics_agent:
+        nodes.extend((
+            _node("adapter:logistics", "data_adapter", "Scoped logistics session", summary="Bounded catalog and shipment reads with frozen time semantics.", layout=(735, 210)),
+            _node("data:logistics", "data_source", "Atlas logistics bundle", summary="Assigned customers, warehouses, and shipments bundle.", layout=(925, 210)),
+        ))
     for index, name in enumerate(tools):
         nodes.append(_node(f"tool:{name}", "tool", name, group="agent:logistics",
                            summary="Reviewed logistics tool.", source=refs.get("harness/logistics.py", []),
                            layout=(535, 168 + index * 90)))
     edges = [_edge("context:task", "agent:logistics", "supplies_context"),
-             _edge("agent:logistics", "supervisor:telemetry", "observed_by"),
-             _edge("adapter:logistics", "data:logistics", "reads_from")]
+             _edge("agent:logistics", "supervisor:telemetry", "observed_by")]
+    if has_logistics_agent:
+        edges.append(_edge("adapter:logistics", "data:logistics", "reads_from"))
     for name in tools:
         edges.extend((_edge("agent:logistics", f"tool:{name}", "invokes"),
                       _edge(f"tool:{name}", "adapter:logistics", "reads_via")))
@@ -151,6 +162,7 @@ def _logistics_graph(source: Path, config: AnalystConfig) -> dict[str, Any]:
         "runtime_mcp_servers": [],
         "boundaries": ["editable harness", "trusted host"],
         "execution_mode": "direct_tool_dispatch",
+        "missing_components": [] if has_logistics_agent else ["logistics agent", "logistics tools", "logistics data adapter"],
     }}
 
 

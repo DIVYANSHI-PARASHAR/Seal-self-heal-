@@ -204,6 +204,32 @@ def test_logistics_ui_loads_public_bundle_and_records_reviewed_tool_call():
     assert app.history.get_run(run["run_id"])["invocation"]["task_family"] == "logistics-shipment-threshold"
 
 
+def test_logistics_capability_gap_queues_an_evolution_job(monkeypatch):
+    app = make_application(supported_model)
+    app.logistics = LogisticsDatasetStore(app.history.runs.database)
+    app.logistics.ensure_indexes()
+    _, seeded = app.api("POST", "/api/datasets/logistics", {})
+
+    def missing_capability(self, invocation, *, run_id=None):
+        return RunResult(
+            run_id or "gap", None, None, "unsupported", None, 0, 0, 0, 0, 0, 0,
+            limitation_kind="capability_gap", limitation_reason="A shipment threshold tool is required",
+            capability_request={"kind": "shipment_customer_threshold", "domain": "logistics"},
+        )
+
+    monkeypatch.setattr("self_heal.web.LogisticsAgent.run", missing_capability)
+    status, run = app.api("POST", "/api/runs", {
+        "input_kind": "logistics_bundle", "dataset_id": seeded["id"],
+        "question": "How many customers sent more than 15 shipments from warehouse 3 yesterday?",
+    })
+    assert status == 201
+    assert run["outcome"] == "unsupported"
+    assert run["evolution_job_id"].startswith("evolution_")
+    assert run["evolution_url"] == "#evolve/" + run["evolution_job_id"]
+    stored = app.history.get_run(run["run_id"])
+    assert stored and stored["evolution_job_id"] == run["evolution_job_id"]
+
+
 def test_logistics_ui_uses_the_active_pinned_candidate(monkeypatch):
     app = make_application(supported_model)
     app.logistics = LogisticsDatasetStore(app.history.runs.database)

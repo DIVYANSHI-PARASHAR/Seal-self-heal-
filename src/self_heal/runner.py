@@ -43,6 +43,20 @@ class CandidateRunner:
         self.image = image
         self.repository = (repository or Path(__file__).resolve().parents[2]).resolve()
 
+    def dataset_info(self, dataset: DatasetInfo | DatasetBundleInfo) -> DatasetInfo | DatasetBundleInfo:
+        """Re-read immutable metadata through the store that owns this input."""
+
+        input_kind = getattr(dataset, "input_kind", "inventory_table")
+        if input_kind == "logistics_bundle":
+            if self.logistics is None:
+                raise RunnerError("Logistics candidate execution is not configured")
+            return self.logistics.dataset_info(dataset.dataset_id)
+        if input_kind == "inventory_table":
+            if self.store is None:
+                raise RunnerError("Inventory candidate execution is not configured")
+            return self.store.dataset_info(dataset.dataset_id)
+        raise RunnerError("Candidate input kind is not supported")
+
     def image_identity(self) -> str:
         result = subprocess.run(
             ["docker", "image", "inspect", "--format", "{{.Id}}", self.image],
@@ -80,17 +94,17 @@ class CandidateRunner:
                                capture_output=True, text=True, check=False, timeout=5)
         if head.returncode or dirty.returncode or head.stdout.strip() != source_commit or dirty.stdout.strip():
             raise RunnerError("Candidate source does not match its pinned clean commit")
-        input_kind = dataset.input_kind
+        input_kind = getattr(dataset, "input_kind", "inventory_table")
         if input_kind == "logistics_bundle":
             if self.logistics is None:
                 raise RunnerError("Logistics candidate execution is not configured")
-            verified = self.logistics.dataset_info(dataset.dataset_id)
+            verified = self.dataset_info(dataset)
             table = self.logistics.open_session(dataset.dataset_id)
             audited_tools = EvidenceTools(LogisticsTools(table, self.config))
         elif input_kind == "inventory_table":
             if self.store is None:
                 raise RunnerError("Inventory candidate execution is not configured")
-            verified = self.store.dataset_info(dataset.dataset_id)
+            verified = self.dataset_info(dataset)
             table = self.store.open_session(dataset.dataset_id)
             audited_tools = EvidenceTools(AnalystTools(table, self.config))
         else:

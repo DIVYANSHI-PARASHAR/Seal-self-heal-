@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import sys
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,7 @@ from self_heal.settings import evolution_model_config
 from self_heal.final_assessment import FinalAssessmentError, reserve_cases, assess_cases
 from self_heal.logistics_store import LogisticsDatasetStore
 from self_heal.logistics_evaluation import run_logistics_checks
+from self_heal.logistics_evolution import FamilyEvolutionController, LogisticsEvolutionController
 from evals.logistics.generator import public_incident_bundle
 
 
@@ -348,15 +350,38 @@ def _run_ui_command(
         if not evolution_key or not evolution_id:
             raise RuntimeError("OPENROUTER_EVOLUTION_MODEL is not configured")
         job_telemetry = LangSmithTelemetry(tracing)
-        return EvolutionController(
-            store=store, history=history, config=config, telemetry=job_telemetry,
-            repository=CandidateRepository(Path.cwd()),
-            runner=CandidateRunner(store=store, logistics=logistics, config=config, history=history, telemetry=job_telemetry,
-                                   image=os.environ.get("SELF_HEAL_RUNNER_IMAGE", "self-heal-runner:local")),
-            model_factory=lambda: OpenRouterModel(api_key, model_id),
-            evolution_model=OpenRouterModel(evolution_key, evolution_id, timeout_seconds=120),
-            on_progress=on_progress,
-        )
+        repository = CandidateRepository(Path.cwd())
+        agent_model = lambda: OpenRouterModel(api_key, model_id)
+        evolution_model = lambda: OpenRouterModel(evolution_key, evolution_id, timeout_seconds=120)
+
+        def inventory_controller():
+            return EvolutionController(
+                store=store, history=history, config=config, telemetry=job_telemetry,
+                repository=repository,
+                runner=CandidateRunner(store=store, logistics=logistics, config=config, history=history,
+                                       telemetry=job_telemetry,
+                                       image=os.environ.get("SELF_HEAL_RUNNER_IMAGE", "self-heal-runner:local")),
+                model_factory=agent_model, evolution_model=evolution_model(), on_progress=on_progress,
+            )
+
+        def logistics_controller():
+            contract = (config.task_contracts or {}).get("logistics-shipment-threshold-v1")
+            if not contract:
+                raise RuntimeError("Logistics task contract is unavailable")
+            scoped = replace(config, task_family="logistics-shipment-threshold",
+                             task_contract_version="logistics-shipment-threshold-v1",
+                             contract_hash=canonical_hash(contract))
+            return LogisticsEvolutionController(
+                logistics=logistics, history=history, config=scoped, telemetry=job_telemetry,
+                repository=repository,
+                runner=CandidateRunner(store=store, logistics=logistics, config=scoped, history=history,
+                                       telemetry=job_telemetry,
+                                       image=os.environ.get("SELF_HEAL_RUNNER_IMAGE", "self-heal-runner:local")),
+                model_factory=agent_model, evolution_model=evolution_model(), on_progress=on_progress,
+            )
+
+        return FamilyEvolutionController(history=history, inventory=inventory_controller,
+                                         logistics=logistics_controller)
 
     application = WebApplication(
         store=store,
@@ -466,16 +491,38 @@ def main(argv: list[str] | None = None) -> int:
                 agent_key, agent_id = agent_model_config()
                 evolution_key, evolution_id = evolution_model_config()
                 telemetry = LangSmithTelemetry(langsmith_config())
-                runner = CandidateRunner(store=store, config=config, history=history,
-                                         telemetry=telemetry, image=image)
-                controller = EvolutionController(
-                    store=store, history=history, config=config, telemetry=telemetry,
-                    repository=CandidateRepository(Path.cwd()), runner=runner,
-                    model_factory=lambda: OpenRouterModel(agent_key, agent_id),
-                    evolution_model=OpenRouterModel(evolution_key, evolution_id, timeout_seconds=120),
-                )
-                result = (controller.rescreen(args.run_id, args.rescreen_candidate)
-                          if args.rescreen_candidate else controller.evolve(args.run_id))
+                repository = CandidateRepository(Path.cwd())
+                observed = history.get_run(args.run_id) or {}
+                family = (observed.get("invocation") or {}).get("task_family")
+                if family == "logistics-shipment-threshold":
+                    if args.rescreen_candidate:
+                        raise EvolutionBlocked("Logistics candidates cannot be rescreened; submit a new incident")
+                    contract = (config.task_contracts or {}).get("logistics-shipment-threshold-v1")
+                    if not contract:
+                        raise EvolutionBlocked("Logistics task contract is unavailable")
+                    scoped = replace(config, task_family="logistics-shipment-threshold",
+                                     task_contract_version="logistics-shipment-threshold-v1",
+                                     contract_hash=canonical_hash(contract))
+                    controller = LogisticsEvolutionController(
+                        logistics=logistics, history=history, config=scoped, telemetry=telemetry,
+                        repository=repository,
+                        runner=CandidateRunner(store=store, logistics=logistics, config=scoped, history=history,
+                                               telemetry=telemetry, image=image),
+                        model_factory=lambda: OpenRouterModel(agent_key, agent_id),
+                        evolution_model=OpenRouterModel(evolution_key, evolution_id, timeout_seconds=120),
+                    )
+                    result = controller.evolve(args.run_id)
+                else:
+                    runner = CandidateRunner(store=store, logistics=logistics, config=config, history=history,
+                                             telemetry=telemetry, image=image)
+                    controller = EvolutionController(
+                        store=store, history=history, config=config, telemetry=telemetry,
+                        repository=repository, runner=runner,
+                        model_factory=lambda: OpenRouterModel(agent_key, agent_id),
+                        evolution_model=OpenRouterModel(evolution_key, evolution_id, timeout_seconds=120),
+                    )
+                    result = (controller.rescreen(args.run_id, args.rescreen_candidate)
+                              if args.rescreen_candidate else controller.evolve(args.run_id))
                 display = dict(result)
                 if "selection" in display:
                     selection = dict(display["selection"])

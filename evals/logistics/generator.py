@@ -34,3 +34,41 @@ def public_incident_bundle() -> dict[str, Any]:
     add("C8", "W2", "sent", yesterday, 2)
     assert len(shipments) == 74
     return {"reference_instant": reference.isoformat(), "reporting_timezone": "America/New_York", "customers": customers, "warehouses": warehouses, "shipments": shipments}
+
+
+def private_evaluation_bundle(seed: int) -> dict[str, Any]:
+    """Make a fresh, deterministic logistics bundle for protected selection.
+
+    Candidate code sees this only through a scoped session. Re-keying every
+    relation prevents a patch from relying on public fixture identifiers, while
+    the bounded additional shipment set varies the expected threshold count.
+    """
+
+    if type(seed) is not int or seed < 0:
+        raise ValueError("Evaluation seed must be a nonnegative integer")
+    base = public_incident_bundle()
+    suffix = f"P{seed:08x}"
+    customer_ids = {row["customer_id"]: f"{suffix}-{row['customer_id']}" for row in base["customers"]}
+    warehouse_ids = {row["warehouse_id"]: f"{suffix}-{row['warehouse_id']}" for row in base["warehouses"]}
+    customers = [{**row, "customer_id": customer_ids[row["customer_id"]], "segment": "private"}
+                 for row in base["customers"]]
+    warehouses = [{**row, "warehouse_id": warehouse_ids[row["warehouse_id"]]}
+                  for row in base["warehouses"]]
+    shipments = [
+        {
+            **row,
+            "shipment_id": f"{suffix}-S{index:03d}",
+            "sender_customer_id": customer_ids[row["sender_customer_id"]],
+            "origin_warehouse_id": warehouse_ids[row["origin_warehouse_id"]],
+        }
+        for index, row in enumerate(base["shipments"], start=1)
+    ]
+    extra = seed % 7 + 1
+    for index in range(extra):
+        shipments.append({
+            "shipment_id": f"{suffix}-X{index:03d}",
+            "sender_customer_id": customer_ids["C4"],
+            "origin_warehouse_id": warehouse_ids["W3"],
+            "status": "sent", "sent_at": base["shipments"][0]["sent_at"],
+        })
+    return {**base, "customers": customers, "warehouses": warehouses, "shipments": shipments}

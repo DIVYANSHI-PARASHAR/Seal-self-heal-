@@ -12,6 +12,7 @@ import mongomock
 from harness.agent import RunResult
 from self_heal.evolution_jobs import EvolutionJobService
 from self_heal.execution import RunExecution
+from self_heal.logistics_evolution import FamilyEvolutionController
 from self_heal.model import ModelReply, ToolCall
 from self_heal.settings import LangSmithConfig, load_config
 from self_heal.storage import AtlasHistoryStore
@@ -74,6 +75,23 @@ def test_workflow_snapshot_is_typed_deduplicated_and_diffable():
     assert [node["id"] for node in diff["nodes"]["added"]] == ["tool:proposed"]
 
 
+def test_historical_logistics_workflow_does_not_invent_an_unregistered_tool(tmp_path):
+    source = tmp_path / "historical"
+    (source / "harness").mkdir(parents=True)
+    (source / "harness" / "agent.py").write_text("# inventory-only baseline\n")
+    config = load_config()
+    snapshot = extract_workflow(
+        source=source, source_commit="inventory-only", config=config,
+        task_family="logistics-shipment-threshold",
+    )
+    nodes = {node["id"]: node for node in snapshot.graph["nodes"]}
+    assert nodes["agent:logistics"]["label"] == "No logistics agent registered"
+    assert "tool:count_customers_over_shipment_threshold" not in nodes
+    assert snapshot.graph["metadata"]["missing_components"] == [
+        "logistics agent", "logistics tools", "logistics data adapter",
+    ]
+
+
 def test_browser_run_binds_a_saved_workflow_and_queues_one_durable_job():
     app = _application([ModelReply('{"error":"Revenue is outside the inventory contract"}', (), 4)])
     _, run = app.api("POST", "/api/runs", {"dataset_id": "small", "question": "What is total revenue?"})
@@ -112,3 +130,41 @@ def test_background_job_records_replayable_progress_without_a_browser():
     events = history.evolution_events_after(job["job_id"])
     assert [event["sequence"] for event in events] == list(range(1, len(events) + 1))
     assert [event["stage"] for event in events] == ["incident_classified", "workflow_snapshot_ready", "diagnosing", "proposal_received", "evaluating", "rejected"]
+
+
+def test_background_job_dispatches_a_logistics_incident_to_its_controller():
+    """A logistics gap must never fall through to the Atlas-only controller."""
+
+    history = _history()
+    history.runs.insert_one({
+        "_id": "logistics-incident", "run_id": "logistics-incident", "status": "completed",
+        "invocation": {"task_family": "logistics-shipment-threshold"},
+    })
+    selected: list[str] = []
+
+    class LogisticsController:
+        def evolve(self, run_id):
+            selected.append(run_id)
+            return {"run_id": run_id, "status": "open", "reason": "Selection rejected"}
+
+    def controller_factory(_progress):
+        return FamilyEvolutionController(
+            history=history,
+            inventory=lambda: (_ for _ in ()).throw(AssertionError("inventory controller selected")),
+            logistics=LogisticsController,
+        )
+
+    service = EvolutionJobService(history=history, controller_factory=controller_factory)
+    job, created = service.queue(
+        incident_run_id="logistics-incident", workflow_revision_id="workflow_logistics",
+        task_family="logistics-shipment-threshold",
+    )
+    assert created
+    for _ in range(100):
+        current = history.get_evolution_job(job["job_id"])
+        if current and current.get("status") == "rejected":
+            break
+        time.sleep(0.01)
+    current = history.get_evolution_job(job["job_id"])
+    assert current and current["status"] == "rejected"
+    assert selected == ["logistics-incident"]

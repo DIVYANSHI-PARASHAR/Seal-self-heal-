@@ -1,16 +1,25 @@
+import json
+import uuid
+from dataclasses import replace
 from datetime import datetime, timezone
+from pathlib import Path
 
 import mongomock
 import pytest
 
 from evals.logistics.generator import public_incident_bundle
 from evals.logistics.oracle import reference_answer
-from harness.agent import AnalystAgent
+from harness.agent import AnalystAgent, RunResult, logistics_capability_request
 from harness.logistics import LogisticsAgent, LogisticsTools, TOOL_NAME
 from harness.tools import AnalystTools
 from self_heal.input_router import InputRouter
 from self_heal.logistics_store import LogisticsDatasetStore
 from self_heal.logistics_evaluation import run_logistics_checks
+from self_heal.logistics_evolution import FamilyEvolutionController, LogisticsEvolutionController
+from self_heal.execution import RunExecution
+from self_heal.model import ModelReply
+from self_heal.repository import CandidateSource
+from self_heal.telemetry import TraceEvidence
 from self_heal.settings import LangSmithConfig, load_config
 from self_heal.storage import AtlasHistoryStore
 from self_heal.table_store import AtlasTableStore, DatasetError, TableAccessError
@@ -132,3 +141,78 @@ def test_router_requires_an_explicit_input_kind():
     assert router.describe(input_kind="logistics_bundle", dataset_id="logistics").relation_counts == {"customers": 8, "warehouses": 3, "shipments": 74}
     with pytest.raises(ValueError, match="input kind"):
         router.describe(input_kind="unknown", dataset_id="inventory")
+
+
+def test_logistics_evolution_uses_the_bundle_controller_and_records_paired_trials():
+    store, database, dataset, _ = materialized_store()
+    history = AtlasHistoryStore(database)
+    history.ensure_indexes()
+    config = load_config()
+    question = "How many customers sent more than 15 shipments from warehouse 3 yesterday?"
+    history.runs.insert_one({
+        "_id": "logistics-gap", "run_id": "logistics-gap", "status": "completed",
+        "outcome": "unsupported", "limitation_kind": "capability_gap",
+        "limitation_reason": "A bounded shipment tool is required",
+        "invocation": {"question": question, "task_family": "logistics-shipment-threshold"},
+        "dataset": {"id": dataset.dataset_id, "content_hash": dataset.content_hash,
+                    "input_kind": "logistics_bundle"},
+        "execution": {"source": {"commit": "baseline", "dirty": False}},
+        "trace": {"status": "disabled"},
+    })
+    inventory = AtlasTableStore(database, config)
+    inventory.ensure_indexes()
+    inventory.materialize("small", [{"sku": "A", "warehouse": "East", "category": "Tools", "on_hand": 1, "reserved": 0}])
+
+    class Runner:
+        def __init__(self):
+            self.store, self.logistics = inventory, store
+
+        def image_identity(self): return "sha256:test"
+
+        def dataset_info(self, info):
+            return (store.dataset_info(info.dataset_id) if getattr(info, "input_kind", "inventory_table") == "logistics_bundle"
+                    else inventory.dataset_info(info.dataset_id))
+
+        def run(self, *, source_commit, dataset, invocation, **_kwargs):
+            request = logistics_capability_request(invocation) if isinstance(invocation, str) else None
+            if getattr(dataset, "input_kind", "inventory_table") == "logistics_bundle" and request and source_commit == "candidate":
+                task = {key: request[key] for key in ("operation", "warehouse_number", "relative_day", "threshold")}
+                bundle = {**store.verified_relations(dataset.dataset_id),
+                          "reference_instant": dataset.reference_instant.isoformat(),
+                          "reporting_timezone": dataset.reporting_timezone}
+                result = RunResult(str(uuid.uuid4()), reference_answer(bundle, task), None, "answered", task, 0, 1, 0, 0.01, 2, 100)
+            elif getattr(dataset, "input_kind", "inventory_table") == "logistics_bundle":
+                result = RunResult(str(uuid.uuid4()), None, None, "unsupported", None, 0, 0, 0, 0.01, 0, 0,
+                                   limitation_kind="capability_gap", limitation_reason="Missing tool")
+            else:
+                result = RunResult(str(uuid.uuid4()), {"value": 0}, None, "answered", {}, 0, 0, 0, 0.01, 0, 0)
+            return RunExecution(result, TraceEvidence(None, None, "disabled", "test", None, None), "recorded")
+
+    class Repository:
+        def resolve_commit(self, _commit): return "baseline"
+        def create_worktree(self, _commit): return Path(__file__).resolve().parents[1]
+        def apply_proposal(self, parent, diff):
+            return CandidateSource(parent, "candidate", Path(__file__).resolve().parents[1], diff, ("harness/logistics.py",))
+        def inspect(self, _source): pass
+
+    class ProposalModel:
+        def complete(self, *_args):
+            return ModelReply(json.dumps({"hypothesis": "A bounded tool is missing", "changed_mechanism": "tool registration",
+                "diff": "diff --git a/harness/logistics.py b/harness/logistics.py\n"}), (), 1)
+
+    events = []
+    controller = LogisticsEvolutionController(
+        logistics=store, history=history, config=replace(
+            config, task_family="logistics-shipment-threshold", task_contract_version="logistics-shipment-threshold-v1",
+        ), telemetry=LangSmithTelemetry(LangSmithConfig(False, None, "test", None)),
+        repository=Repository(), runner=Runner(), model_factory=NoCallsModel,
+        evolution_model=ProposalModel(), on_progress=lambda stage, payload: events.append(stage),
+    )
+    router = FamilyEvolutionController(history=history, inventory=lambda: pytest.fail("inventory controller selected"),
+                                       logistics=lambda: controller)
+    result = router.evolve("logistics-gap")
+    assert result["status"] == "open"
+    assert "candidate_ready" in events and "evaluating" in events
+    assert history.candidates.count_documents({"incident_run_id": "logistics-gap"}) == 1
+    assert history.selection_plans.count_documents({}) == 1
+    assert history.evaluations.count_documents({"plan_id": {"$exists": True}}) > 0
