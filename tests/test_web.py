@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from threading import Thread
 from typing import Any
@@ -104,14 +105,14 @@ def request_json(base_url: str, path: str, *, method: str = "GET", body: dict[st
 def test_local_ui_serves_assets_and_only_dataset_metadata(local_server):
     with urlopen(local_server + "/", timeout=2) as response:  # noqa: S310 -- loopback test server
         page = response.read().decode("utf-8")
-    assert "Ask for available, on-hand, or reserved units" in page
+    assert "Ask about your data" in page
     assert "v1 → v2" not in page
     assert 'id="dataset"' not in page
     assert 'id="suggestions"' in page
-    assert 'role="combobox"' in page
+    assert re.search(r'<textarea\b[^>]*\bid="question"', page)
     assert "Current workspace" not in page
     assert "Connected services" not in page
-    assert 'class="sidebar"' in page
+    assert 'class="navigation-bar"' in page
     assert page.index('id="analysis-form"') < page.index('id="run-details"') < page.index('data-history-list')
     assert 'hidden' in page.split('id="run-details"', 1)[1].split('>', 1)[0]
 
@@ -123,6 +124,13 @@ def test_local_ui_serves_assets_and_only_dataset_metadata(local_server):
 
     with pytest.raises(HTTPError) as error:
         urlopen(local_server + "/%2e%2e/pyproject.toml", timeout=2)  # noqa: S310 -- loopback test server
+    assert error.value.code == 404
+
+    with urlopen(local_server + "/fonts/Geist.woff2", timeout=2) as response:
+        assert response.headers["Content-Type"] == "font/woff2"
+        assert response.read(4) == b"wOF2"
+    with pytest.raises(HTTPError) as error:
+        urlopen(local_server + "/fonts/%2e%2e/%2e%2e/pyproject.toml", timeout=2)
     assert error.value.code == 404
 
 
