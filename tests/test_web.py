@@ -407,3 +407,44 @@ def test_local_ui_rejects_malformed_run_requests(local_server):
         urlopen(request, timeout=2)  # noqa: S310 -- loopback test server
     assert error.value.code == 400
     assert json.loads(error.value.read())["error"] == "A run needs question and an optional dataset_id"
+
+
+def test_running_job_exposes_persisted_plan_and_partial_trials_before_selection():
+    app = make_application(supported_model)
+    app.history.candidates.insert_one({"_id": "candidate-running"})
+    app.history.selection_plans.insert_one({
+        "_id": "plan-running", "candidate_id": "candidate-running",
+        "cases": [{"case_id": "original", "role": "original"},
+                  {"case_id": "private-secret", "role": "private_validation"}],
+    })
+    app.history.evaluations.insert_one({
+        "_id": "trial-running", "trial_id": "trial-running", "plan_id": "plan-running",
+        "case_id": "private-secret", "case_role": "private_validation", "passed": False,
+        "violation": "private diagnostic", "candidate": {"version": "candidate"},
+        "created_at": utc_now(), "resources": {"elapsed_seconds": 0.3},
+    })
+    result = app._job_evaluations({"candidate_id": "candidate-running", "status": "running"}, limit=100)
+    assert result["plan_id"] == "plan-running"
+    assert result["watermark"] == 1
+    assert result["scheduled"]["candidate"] == {"original": 2, "private_validation": 2}
+    assert result["groups"][0]["failed"] == 1
+    assert result["groups"][0]["pending"] == 1
+    assert result["trials"][0]["case_id"] is None
+    assert result["trials"][0]["violation"] is None
+    assert app._job_evaluations({"candidate_id": "not-started"}, limit=100)["plan_id"] is None
+
+
+def test_logistics_run_version_retains_the_exact_executed_commit():
+    from self_heal.web import _history_summary
+    from harness.logistics import TOOL_VERSION
+
+    record = {
+        "run_id": "accepted-rerun", "outcome": "answered", "answer": {"value": 2},
+        "dataset": {"input_kind": "logistics_bundle"},
+        "interpreted_task": {"operation": "count_customers_with_shipment_count_gt",
+                             "warehouse_number": 3, "relative_day": "yesterday", "threshold": 15},
+        "execution": {"source": {"commit": "exact-tested-candidate"}},
+    }
+    assert _history_summary(record)["version"] == "exact-tested-candidate"
+    assert _history_summary(record, detail=True)["version"] == "exact-tested-candidate"
+    assert _history_summary({**record, "execution": {}})["version"] == TOOL_VERSION
