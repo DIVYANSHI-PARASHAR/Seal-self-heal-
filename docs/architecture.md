@@ -2,7 +2,7 @@
 
 Self-Heal is one local application containing a custom analyst harness and a trusted supervisor. The harness evolves in response to task evidence; the supervisor runs separately so it can evaluate and start a new version without modifying an in-flight process.
 
-**Implementation status:** Phases 1–5 are implemented and locally tested. Incident diagnosis, model-proposed harness diffs, immutable selection plans, Docker execution, protected scoring, conditional activation, and rollback now exist. The operator UI and CLI use the active commit for new runs. A complete live model-generated promotion has not yet been verified; Phase 6 remains outstanding.
+**Implementation status:** Phases 1–5 are implemented and locally tested. Incident diagnosis, model-proposed harness diffs, immutable selection plans, Docker execution, protected scoring, conditional activation, and rollback now exist. The operator UI and CLI use the active commit for new runs. Final-assessment reserve, exclusion, consumption, and lineage controls are implemented and tested. An isolated demo records a live model-generated promotion and successful rerun; an untouched final assessment has not yet been verified. Live service records are not committed to Git.
 
 ## Components
 
@@ -37,7 +37,7 @@ The supervisor processes a task observation directly. A distributed queue, datab
 
 ## Editable harness and protected infrastructure
 
-| Area | Planned responsibility | Candidate may edit? |
+| Area | Responsibility | Candidate may edit? |
 | --- | --- | --- |
 | `harness/agent.py` | Small model/tool loop using the fixed runtime interface | Yes |
 | `harness/tools.py` | Tool implementations, descriptions, and registration | Yes |
@@ -111,4 +111,4 @@ GitHub publishing is optional: a branch and PR can show the diff and evidence af
 
 ## Scope of the claim
 
-The first build demonstrates task-driven changes to tools/context, evaluated on a bounded analyst domain. It does not demonstrate arbitrary user personalization, unlimited self-modification, or generalization to all agent tasks. See [evaluation design](evaluation.md) for the evidence needed and [build plan](build-plan.md) for implementation order.
+The first build demonstrates task-driven changes to tools/context, evaluated on a bounded analyst domain. It does not demonstrate arbitrary user personalization, unlimited self-modification, or generalization to all agent tasks. See [evaluation design](evaluation.md) for the evidence needed and [review guide](../CONTRIBUTING.md) for a focused source review.

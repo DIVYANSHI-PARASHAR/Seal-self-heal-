@@ -1,158 +1,213 @@
 # Self-Heal
 
-Self-Heal is a task-adaptive agent harness. A trusted supervisor turns observed task limitations into reproducible evaluations, proposes a reusable harness change, tests it against existing and fresh cases, and activates only a validated version.
+**An agent harness that turns failures into evaluations—and accepts changes only when the evidence supports them.**
 
-The first use case is a small Python analyst for structured tables. The editable harness owns its tools and context policy. The protected supervisor owns the oracle, evaluation limits, trace integration, and version decisions.
+Self-Heal is a Python prototype for improving an agent's tools and context policy while keeping its model, task contract, grader, and resource limits fixed. A trusted supervisor reproduces a limitation, freezes a test case, asks a model for a reusable harness patch, and evaluates the exact candidate commit before activation.
 
-MongoDB Atlas holds structured analyst tables and compact run, case, candidate, evaluation, gap, and version records. A trusted table interface lets each run read only its assigned dataset without exposing Atlas credentials to generated harness code. LangSmith holds detailed model and tool traces. OpenRouter supplies model calls. Candidate code runs in a local Docker container; Git pins each evaluated version.
+The core question: **did the agent gain a capability, or did it just learn to pass the example?**
 
-**Status:** Phases 1–5 and the Phase 6 reserve/assessment controls are implemented. The Phase 4–5 control flow, selection gates, promotion, and Docker bridge pass local tests, including a real Docker run. A live bulk failure was reproduced and sent through the configured evolution model. Its recovered proposal was rejected after 28 recorded selection trials because it failed correctness and regression gates. No candidate was activated, so there is no live final-assessment result yet.
+[Demo](#narrated-demo) · [Quick start](#quick-start) · [Architecture](#architecture) · [Evaluation process](#evaluation-process) · [Setup guide](SETUP.md) · [Review guide](CONTRIBUTING.md)
 
-## Use the local operator UI
+## Narrated demo
 
-The operator UI uses the same trusted execution path as the CLI. It automatically chooses a ready
-operator dataset and has separate Ask, Runs, Evaluations, and Versions pages. The question field stays
-at the top of every page. A run detail shows its answer, resources, Atlas rows actually read, tool
-calls, timeline, verified LangSmith span metadata when available, and candidate checks for capability
-gaps. The evaluation page includes stored selection/baseline trials and final assessments, labeled by
-role. Once a version
-is active, new UI and CLI runs use that pinned commit through the Docker runner. Evolution decisions
-are available through the CLI and Atlas history.
+[![Watch the narrated Self-Heal demo](docs/media/self-heal-demo.png)](docs/media/self-heal-demo.mp4)
 
-Materialize a dataset, then start the loopback-only server:
+[Watch the video · 1 minute 54 seconds](docs/media/self-heal-demo.mp4)
 
-```sh
-uv run --env-file .env self-heal seed --fixture evals/analyst/data/small_inventory.json
-uv run --env-file .env self-heal seed-logistics
-uv run --env-file .env self-heal ui
-```
+Follow the complete flow: capability failure → captured logs → proposed repair →
+28 paired evaluation trials → activation → automatic rerun answering **2 customers**.
+The demo uses live services on an intentionally limited, isolated baseline with
+synthetic data. Waits are accelerated; narration and optional English captions are included.
 
-Open [http://127.0.0.1:4173](http://127.0.0.1:4173). Use `self-heal ui --help` for an explicit
-host or port override. The UI exposes bounded redacted snapshots of rows read during each run, not
-complete datasets or full LangSmith trace contents.
+## Why this is interesting
 
-The browser selects the logistics bundle by default when available. If it is not seeded yet, use
-**Load logistics demo** in the UI, or run `self-heal seed-logistics` before starting the server.
-The public bundle contains 8 customers, 3 warehouses, and 74 shipments. Earlier baseline runs
-recorded an honest capability gap for “How many customers sent more than 15 shipments from warehouse
-3 yesterday?” The reviewed `logistics-shipment-threshold-tool-v2` harness now scans bounded shipment
-pages and returns the oracle answer of 2; the same tool handles other thresholds and warehouses.
-Run `uv run --env-file .env self-heal eval logistics` to record four oracle-graded logistics checks
-in Atlas. This is a reviewed code update, not an automatically generated or promoted candidate.
-The source selector can switch back to an inventory table for existing inventory questions.
+- **Failures become durable tests.** Wrong answers, exhausted budgets, exceptions, and explicit capability gaps retain their provenance and become regression evidence when independently gradable.
+- **The agent cannot change its own grading rules.** Candidate edits are limited to `harness/`; the oracle, contracts, limits, and promotion logic stay in protected code.
+- **Improvement is attributable.** Baseline and candidate use the same model, datasets, configuration, and Docker image. Comparisons pin commits and content hashes.
+- **Selection and final assessment are separate.** Repeated validation feedback is development evidence. Untouched final cases are reserved before evolution and consumed once.
+- **Every decision is inspectable.** Atlas links incidents, cases, diffs, trials, active versions, and rollback history; LangSmith supplies detailed redacted traces.
 
-## Phase 6: final assessment and lineage
+**Status:** implemented research prototype with local tests for the supervisor, bounded data interfaces, selection, promotion, rollback, and final-assessment controls. An earlier live candidate was rejected after 28 selection trials. A live recording on October 9, 2026 established a model-generated logistics repair in an isolated, intentionally limited baseline: 28 protected paired trials, accepted activation, and a successful automatic rerun. It uses synthetic data; an untouched final assessment has not been established. Live service records are not committed to Git. The shipped logistics capability is a reviewed code change, not evidence of autonomous evolution.
 
-Reserve fresh cases **before** evolving a candidate. Put the private manifest outside the checkout,
-for example in a protected temporary directory; it is created with owner-only permissions. The
-reserve command publishes two immutable `final-` Atlas datasets and stores their IDs, hashes, tasks,
-and oracle hashes in the manifest. Candidate selection rejects `final-` datasets, and the operator UI
-never selects them for ordinary questions.
+## Quick start
+
+Run commands from the repository root. Requirements: **Python 3.11+**, **uv**, and **Git**. Live tasks also require **MongoDB Atlas** and **OpenRouter**. Evolution requires **Docker** and verified **LangSmith** tracing.
+
+### 1. Install and verify without credentials
 
 ```sh
-uv run --env-file .env self-heal final reserve --manifest /tmp/self-heal-final-2026.json
-# Run the normal incident → evolve → selection → promotion cycle.
-uv run --env-file .env self-heal final assess --manifest /tmp/self-heal-final-2026.json
-uv run --env-file .env self-heal history final
-uv run --env-file .env self-heal history lineage --run-id <incident-run-id>
+uv sync --frozen --extra dev
+uv run --frozen pytest -q
+uv run --frozen self-heal --help
 ```
 
-`final assess` requires an accepted active commit and the same config, model identity, and Docker
-image as selection. It claims each case in Atlas before the run, so a used case cannot be retried as
-untouched. Results retain individual correctness, resources, trace ID, and failure details in a
-separate `final_assessments` collection. A failed final case is consumed; reserve a new manifest for
-any later final claim. `history lineage` links the incident, capability gap, observed evaluation
-cases, exact candidate diff/commit, selection trials, active commit, and final records. A successful
-final result can only be reported after these commands actually run against an accepted version.
+The default suite uses scripted model replies and an in-memory MongoDB substitute. It needs no API keys or paid services. Three real-container tests are opt-in; see [Testing](#testing).
 
-## Run the analyst
-
-From the repository root, install the locked dependencies and load local credentials from the ignored `.env` file:
+### 2. Configure live services
 
 ```sh
-uv sync --extra dev
-uv run --env-file .env self-heal seed --fixture evals/analyst/data/small_inventory.json
-uv run --env-file .env self-heal run --dataset small-inventory-v1 --question "How many available units are in the East warehouse?"
-uv run --env-file .env self-heal run --dataset small-inventory-v1 --question "What is the total on-hand inventory in the West warehouse?"
+cp .env.example .env
 ```
 
-The seed command publishes the fixture rows to Atlas once and verifies the stored row count and hash on repeat runs. The questions receive conversational answers: “There are 18 available units in the East warehouse” and “There are 19 on-hand units in the West warehouse.” For an ambiguous or unsupported question, the agent says “I can't answer that with my current capabilities” and exits normally without reading the table. Actual runtime failures still return an error and a nonzero exit code. Add `--json` to a question command to see its outcome, interpreted task, run ID, resource counts, compact trace link or ID, and Atlas history status. Question interpretation uses the configured model and counts toward the same run limits. Questions must fit the supported metrics, one optional equality filter, and one optional grouping field.
+Fill in `ATLAS_URI`, `OPENROUTER_API_KEY`, and `OPENROUTER_AGENT_MODEL` in the ignored `.env`. Use a tool-calling model available to your OpenRouter account. Keep `LANGSMITH_TRACING=false` for a basic task run, or configure its key and enable it for evolution. [SETUP.md](SETUP.md) explains every setting, service requirement, and common failure.
 
-For a reproducible evaluation input, the structured task form remains available:
+The template uses this repository's `self_heal` database. Use a separate database for an isolated demo or a different baseline, so active commits and run identities remain consistent. Live commands use model credits and write datasets/history to the configured database.
+
+### 3. Ask an inventory question
 
 ```sh
-uv run --env-file .env self-heal run --dataset small-inventory-v1 --task '{"metric":"available","filter_field":"warehouse","filter_value":"East"}'
+uv run --frozen --env-file .env self-heal seed --fixture evals/analyst/data/small_inventory.json
+uv run --frozen --env-file .env self-heal run --dataset small-inventory-v1 \
+  --question "How many available units are in the East warehouse?"
 ```
 
-Structured task runs continue to print JSON with the answer and run metadata.
-
-## Inspect Phase 3 evidence
-
-With `LANGSMITH_TRACING=true`, `LANGSMITH_API_KEY`, and `LANGSMITH_PROJECT` set, every `run` and `eval run` command creates a LangSmith root trace using the same UUID as its Atlas `runs` record. The CLI returns only compact evidence; inspect detailed model and tool activity through the returned LangSmith link. If trace upload or immediate retrieval cannot be verified, `trace.status` is `incomplete` while the independently measured agent result remains intact.
-
-Use Atlas-backed history retrieval to find requests that the current harness explicitly knows it cannot answer:
+Expected answer: **18 available units**. Add `--json` for outcome, interpreted task, resource counters, run ID, and evidence status. For a reproducible input, use `--task` instead of `--question`:
 
 ```sh
-uv run --env-file .env self-heal run --dataset small-inventory-v1 --question "What is total revenue?" --json
-uv run --env-file .env self-heal history capability-gaps --task-family inventory-totals
+uv run --frozen --env-file .env self-heal run --dataset small-inventory-v1 \
+  --task '{"metric":"available","filter_field":"warehouse","filter_value":"East"}'
 ```
 
-The gap list includes the original question, dataset ID and content hash, source/config/model identity, independent resource measurements, and LangSmith root trace reference. It contains no copied table rows or full trace payloads. Rows remain in `analyst_datasets` and `analyst_rows`; detailed trace payloads remain in LangSmith after redaction. `self-heal history run --run-id <id>` returns one compact record, and `self-heal history candidates --task-family inventory-totals` shows proposal history.
-
-The base harness registers `inspect_table`, `read_rows`, and `calculate`. A trusted table adapter binds each run to one Atlas dataset and enforces page and byte limits. Its dataset definitions live in `evals/analyst/data/`; runtime rows are read from Atlas. Generated code receives no connection string or protected oracle files.
-
-## Logistics capability foundation
-
-The protected logistics expansion is additive: `logistics_datasets`,
-`logistics_customers`, `logistics_warehouses`, and `logistics_shipments` hold
-immutable related-data bundles alongside the existing inventory collections.
-`evals/logistics/generator.py` defines the synthetic 74-shipment public
-incident fixture; its independent oracle returns `{"value": 2}` for “How
-many customers sent more than 15 shipments from warehouse 3 yesterday?”
-
-The original baseline deliberately refused that reviewed request before any
-model or data read, with a `capability_gap` and a structured
-`shipment_customer_threshold` request. Those recorded runs preserve the
-evolution signal. The reviewed v2 tool now answers through the protected
-logistics session, which exposes only catalog/relation inspection and
-filter-bound, cursor-bound shipment pages. It does not expose database
-credentials, collection names, or arbitrary queries.
-
-## Run the protected baseline evaluation
-
-Phase 2 declares one small success, one zero-match edge case, and one 512-row grouped stress case in `evals/analyst/scenarios.yaml`. Materialize their valid datasets, then run either baseline check:
+### 4. Open the operator UI
 
 ```sh
-uv run --env-file .env self-heal eval materialize
-uv run --env-file .env self-heal eval run --scenario small-east-available
-uv run --env-file .env self-heal eval run --scenario bulk-warehouse-available
+uv run --frozen --env-file .env self-heal seed-logistics
+uv run --frozen --env-file .env self-heal ui
 ```
 
-The small case must pass. The bulk case must report `model_call_budget_exhausted`: each model tool call can read at most four rows, so the base harness cannot inspect all 512 rows inside its eight model calls. The command exits successfully when the observed result matches the declared baseline expectation. Invalid-row scenarios are deliberately skipped during materialization and are tested locally to ensure Atlas rejects them.
+Open [localhost:4173](http://127.0.0.1:4173). The UI includes Ask, Runs, Evaluations, and Versions, with bounded redacted row snapshots and linked execution evidence. The public logistics bundle contains 8 customers, 3 warehouses, and 74 shipments. Ask **“How many customers sent more than 15 shipments from warehouse 3 yesterday?”**; the reviewed tool returns **2**. `yesterday` refers to the fixture's synthetic time label.
 
-Evaluation runs use the same Phase 3 supervisor path. They persist a frozen case reference with exposure history, a linked run, and an evaluation record containing the independent pass or violation outcome. The compact command output includes its run and trace IDs; expected answers and table rows are not uploaded as trace payloads.
+The server defaults to loopback and is intended for local use. Seed inventory first if you want to switch sources. See [UI details](ui/README.md).
 
-See [SETUP.md](SETUP.md) for account and environment setup.
+## Architecture
 
-## Evolve and activate a harness version
+```mermaid
+flowchart LR
+    User[CLI / local UI] --> Supervisor[Trusted supervisor]
+    Supervisor --> Harness[Versioned harness]
+    Harness --> Bridge[Bounded model / data interface]
+    Bridge --> Model[OpenRouter]
+    Bridge --> Data[(Atlas datasets)]
+    Supervisor --> Memory[(Atlas evidence / versions)]
+    Supervisor --> Traces[LangSmith traces]
+    Memory --> Evolution[Diagnose / propose / screen]
+    Evolution --> Candidate[Candidate Git commit]
+    Candidate --> Docker[Isolated Docker runner]
+    Docker --> Bridge
+    Docker --> Grader[Protected oracle / selection gates]
+    Grader --> Decision{Accept?}
+    Decision -->|yes| Active[Activate exact tested commit]
+    Decision -->|no| Rejected[Retain rejection evidence]
+    Active --> Supervisor
+```
 
-Build the isolated image once, then run an observed incident by its Atlas run ID:
+| Component                        | Responsibility                                                                                          |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `harness/`                       | Editable agent loop, tools, and context policy; the candidate's only permitted edit surface             |
+| `src/self_heal/`                 | Trusted orchestration, model/data access, telemetry, evolution, selection, promotion, and CLI/UI server |
+| `evals/`                         | Protected deterministic generators, independent inventory/logistics oracles, and public fixtures        |
+| `config/analyst.yaml`            | Task contracts, fixed resource budgets, evaluation thresholds, and edit scope                           |
+| `runner_support/` + `Dockerfile` | Minimal container runtime with host-mediated model and data requests                                    |
+| `prompts/`                       | Fixed scenario, diagnosis, and patch-generation instructions                                            |
+| `ui/`                            | Dependency-free browser interface served by the local Python application                                |
+| `tests/`                         | Scripted and mocked checks plus opt-in real Docker integration                                          |
+
+Atlas stores immutable input data and compact improvement history. LangSmith stores redacted detailed traces; its trace ID links back to the Atlas run. Git pins the baseline and candidate source. The host owns credentials, the oracle, and authoritative resource counters.
+
+Candidate containers have no network, run as a non-root user with a read-only filesystem, and receive the harness through a read-only mount. They receive neither the full repository nor database/provider credentials, expected answers, or private assessment manifests. Model and assigned-dataset requests go through the trusted host bridge. A Git worktree separates versions; Docker supplies the execution boundary. These controls have tests, but are not a proof of security against arbitrary hostile code.
+
+[Detailed architecture and trust boundaries](docs/architecture.md)
+
+## Evaluation process
+
+### The theory: optimize behavior under an unchanged judge
+
+Treat a harness revision as a hypothesis about a reusable mechanism: better aggregation, a new bounded tool, or better context selection. Hold the model and environment fixed, then test whether that mechanism improves exact task correctness within the same limits. This is source-level adaptation, not model-weight training.
+
+The protected oracle computes the expected answer from the data independently of the generated tool. A candidate's explanation or self-reported success never establishes correctness. Faster execution or lower token use cannot compensate for an incorrect answer.
+
+Adaptive search creates an overfitting risk: even hidden validation cases influence development once their pass/fail feedback is used to choose patches. Self-Heal tracks exposure and limits attempts, then uses a separate untouched assessment for the final claim. A few repeated LLM trials reveal variation; they do not establish statistical certainty or broad generalization.
+
+The design draws on [RRSI: Regularized Recursive Self-Improvement of Agent Harnesses](https://arxiv.org/html/2609.24972v2), which studies how finite feedback can lead harness evolution to overfit. Self-Heal applies a bounded version of that concern through attributable edits, leakage screening, repeated trials, cost gates, and separate final assessment. It is not a reproduction of the paper's full algorithm or benchmark results.
+
+### From incident to activation
+
+1. **Observe and classify.** Record the task, dataset hash, source/model/config identities, independent counters, and trace. Distinguish unsupported requests from incorrect answers, budget exhaustion, and external failures.
+2. **Establish ground truth.** Validate the task contract and calculate an independent expected answer. Out-of-contract requests remain capability gaps until a reviewed contract, data interface, and oracle exist.
+3. **Reproduce and freeze.** Replay the baseline on the original task and an incident-derived generated case. Both must reproduce the limitation before proposing a patch; retain frozen datasets and case identities.
+4. **Propose and screen.** Give the evolution model redacted evidence and editable harness source. Screen its unified diff for edit scope and task-specific leakage, then pin a candidate commit.
+5. **Compare under fixed conditions.** Run baseline and candidate against original, generated, regression, private-validation, and unrelated-refusal cases. Use fresh cursors and counters with the same dataset, model, config, and image identities. Retain every trial.
+6. **Apply all gates.** Require exact correctness, preserved regressions/refusals, repeated success on critical cases, complete evidence, and bounded resource use. Reject a candidate that misses any gate.
+7. **Activate conditionally.** Promote only the exact tested commit, provided the active parent and environment still match. Fresh runs use the accepted version; retained versions support rollback.
+8. **Assess once on untouched cases.** Freeze the selected harness and consume reserved final cases. Record correctness, resources, and failures separately from selection.
+
+| Evaluation role       | What it establishes                                           | How to interpret it                                      |
+| --------------------- | ------------------------------------------------------------- | -------------------------------------------------------- |
+| Original reproduction | The failure exists and the candidate resolves it              | Disclosed development evidence; retained as regression   |
+| Existing regressions  | Previously working behavior still works                       | Necessary protection against narrow fixes                |
+| Fresh validation      | Transfer to variations within the declared task family        | Selection evidence; repeated feedback can overfit        |
+| Final assessment      | Performance of the frozen selected version on untouched tasks | One-use assessment; report failures as well as successes |
+
+Default configuration: **3 patch attempts**, **4 validation cases**, **2 live repetitions**, **2× maximum cost ratio**, and **required verified traces**. Runs are bounded by **8 model calls**, **12 tool calls**, **30,000 tokens**, **90 seconds**, **4 rows per page**, **256 pages**, and **1 MB of table data**. See the configuration and [evaluation design](docs/evaluation.md) for exact gate semantics.
+
+### Reproduce the baseline checks
 
 ```sh
-uv run --env-file .env self-heal runner build
-uv run --env-file .env self-heal evolve --run-id <completed-run-id>
-uv run --env-file .env self-heal evolve --run-id <completed-run-id> --rescreen-candidate <candidate-id>
-uv run --env-file .env self-heal history active
+uv run --frozen --env-file .env self-heal eval materialize
+uv run --frozen --env-file .env self-heal eval run --scenario small-east-available
+uv run --frozen --env-file .env self-heal eval run --scenario bulk-warehouse-available
+uv run --frozen --env-file .env self-heal eval logistics
 ```
 
-`evolve` reads the linked LangSmith trace, sends a redacted incident and editable harness source to the configured `OPENROUTER_EVOLUTION_MODEL`, and writes durable Atlas gap, case, candidate, trial, and version records. It accepts only a clean, pinned source commit and a verified dataset. An out-of-contract request remains in `capability_gaps` with the needed contract, data-access, and oracle extension. A gradable failure must reproduce on the original request and a new frozen case before a proposed patch is applied.
+The small inventory case must pass. The 512-row grouped stress case is intentionally beyond the base loop's model-call budget and declares `model_call_budget_exhausted` as its expected baseline outcome. **Exit code 0 means the baseline expectation matched, not necessarily that the task was answered correctly.** Inspect `baseline_expectation_matched`, outcome, and violations in the JSON. Invalid-row cases are checked locally and skipped during Atlas materialization.
 
-Use `--rescreen-candidate` only when a screening implementation bug rejected a stored patch before it received a candidate commit. It reuses the exact stored diff and attempt number, then records a linked selection; it does not grant another model proposal.
+### Run an evolution experiment
 
-The model produces a unified diff limited to `harness/*.py`. The supervisor screens and commits it in an ignored Git worktree. Baseline and candidate run in the same image with only the harness directory mounted read-only. The container has no network, Atlas/OpenRouter/LangSmith credentials, table snapshots, expected answers, or oracle. Model and bounded table requests travel through the host bridge. The host measures calls, tokens, pages, bytes, and time and grades exact answers. Selection freezes the original, generated, regression, private validation, and unrelated refusal cases before trials; it retains every trial and requires repeated success on the original and fresh variations. Promotion checks the exact tested commit and environment, then changes the active version only if its parent still matches. Subsequent `run` commands use that commit. Roll back to a retained version with:
+Enable LangSmith tracing, set `OPENROUTER_EVOLUTION_MODEL`, start Docker, and keep the source tree clean and committed. This review repository starts with a clean source commit; commit any later reviewed source edits before evolution.
 
 ```sh
-uv run --env-file .env self-heal rollback --expected-active <commit> --commit <prior-commit> --reason "reason"
+uv run --frozen --env-file .env self-heal runner build
+# Reserve untouched cases BEFORE exposing evolution to selection feedback.
+uv run --frozen --env-file .env self-heal final reserve --manifest /tmp/self-heal-final-review.json
+# Use the run ID of an actual completed, reproducible limitation.
+uv run --frozen --env-file .env self-heal evolve --run-id <incident-run-id>
+uv run --frozen --env-file .env self-heal history active
+# Assess only after a candidate has passed selection and become active.
+uv run --frozen --env-file .env self-heal final assess --manifest /tmp/self-heal-final-review.json
+uv run --frozen --env-file .env self-heal history lineage --run-id <incident-run-id>
+uv run --frozen --env-file .env self-heal history final
 ```
 
-Selection thresholds and attempt limits live in [config/analyst.yaml](config/analyst.yaml). The Docker image build context is restricted to `runner_support/`; candidate worktrees stay under ignored `.self-heal/`.
+Use a new manifest path for each reservation and keep it outside the checkout. It contains private case references, is created with owner-only permissions, and must never be shared with the proposer. `final-` datasets are excluded from candidate selection and ordinary UI dataset selection. Each final case is claimed before execution; a failed case is consumed too. If final feedback guides a later patch, reserve new untouched cases for a later final claim.
+
+Rollback records a reason and checks the current active commit:
+
+```sh
+uv run --frozen --env-file .env self-heal rollback \
+  --expected-active <active-commit> --commit <retained-prior-commit> --reason "reviewed regression"
+```
+
+## Testing
+
+```sh
+uv run --frozen pytest -q
+```
+
+Tests cover oracle/generator behavior, immutable data, scoped reads, resource accounting, telemetry redaction, patch screening, comparative trials, promotion and rollback, final-case consumption, workflows, and the local UI. Scripted checks validate control flow; they do not prove live model reliability or real container isolation.
+
+To exercise the real Docker boundary, start Docker and run:
+
+```sh
+uv run --frozen self-heal runner build
+SELF_HEAL_DOCKER_TEST=1 uv run --frozen pytest -q tests/test_runner.py
+```
+
+A minimal GitHub Actions workflow runs the default suite on Python 3.11 and 3.12 without service credentials.
+
+## Review and scope
+
+Start with [the review guide](CONTRIBUTING.md), then inspect `config/analyst.yaml`, the independent oracles, `controller.py`, `evaluation.py`, `promotion.py`, and `final_assessment.py`. Evaluate **the acceptance boundary and evidence lineage**, alongside the agent's answers.
+
+The current domains are bounded inventory totals and shipment/customer thresholds. A successful fixture answer does not establish cross-domain generalization. Source, synthetic fixtures, development plans, and demo media are included; private service records, credentials, and cached outputs remain outside Git.
+
+Licensed under [MIT](LICENSE).

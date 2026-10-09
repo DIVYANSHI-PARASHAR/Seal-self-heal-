@@ -2,7 +2,7 @@
 
 Self-Heal turns observed limitations into persistent eval cases, then accepts harness changes only when independent checks support them. The first domain is structured table analysis with a fixed contract for filters, grouping, and numeric aggregates.
 
-**Implementation status:** Phases 1–5 are implemented. The oracle remains outside `harness/`; generated candidates run in a local Docker image through a supervisor-owned model/table bridge. Selection plans pin case, dataset, commit, configuration, image, and model identities before comparative trials. Repeated original and private-validation trials, regression checks, evidence completeness, cost limits, and conditional activation are covered by local tests. A live selection rejected an incorrect candidate after 28 trials; no live promotion has occurred.
+**Implementation status:** Phases 1–5 are implemented. The oracle remains outside `harness/`; generated candidates run in a local Docker image through a supervisor-owned model/table bridge. Selection plans pin case, dataset, commit, configuration, image, and model identities before comparative trials. Repeated original and private-validation trials, regression checks, evidence completeness, cost limits, and conditional activation are covered by local tests. An earlier live selection rejected an incorrect candidate after 28 trials. The isolated demo records an accepted model-generated promotion and automatic rerun; an untouched final assessment has not been established. Live service records are not committed to Git.
 
 ## Creating an eval from an observation
 
