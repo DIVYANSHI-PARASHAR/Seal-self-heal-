@@ -1,0 +1,41 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.8.22'
+          python-version: ${{ matrix.python-version }}
+      - name: Install locked dependencies
+        run: uv sync --frozen --extra dev
+      - name: Run credential-free tests
+        run: uv run --frozen pytest -q
+      - name: Check CLI entry point
+        run: uv run --frozen self-heal --help
+
+  ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Install locked UI dependencies
+        run: npm ci --prefix ui
+      - name: Run UI tests
+        run: npm test --prefix ui
